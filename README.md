@@ -12,7 +12,7 @@
 * Facundo Zamora
 
 **Entrega parcial**
-25/09/2026
+09/10/2026
 
 ---
 
@@ -84,10 +84,6 @@ La solución permitirá a estudiantes y docentes:
 Nuestra motivación principal radica en desarrollar e implementar un producto de software con aplicación e impacto real en la comunidad de la UNTDF. Al desarrollarse dentro del ámbito académico de la sede, se cuenta con la cercanía diaria con los usuarios finales y administradores del laboratorio, lo que facilita un ciclo continuo de retroalimentación, validación directa de requerimientos y ajuste permanente del sistema.
 
 **Referente (Cliente):** Natalia Ader
-
-**Tel:** +54 9 2901 473832
-
-**Email:** nader@untdf.edu.ar
 
 ---
 
