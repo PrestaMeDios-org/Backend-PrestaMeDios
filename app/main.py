@@ -5,6 +5,7 @@ propio router, que se registra aquí de forma explícita.
 """
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.modules.inventory.router import router as inventory_router
 from app.modules.spaces.router import router as spaces_router
@@ -12,6 +13,14 @@ from app.modules.spaces.router import router as spaces_router
 app = FastAPI(
     title="PrestaMeDios API - Catálogo e Inventario",
     version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:8443"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Registro explícito de routers por módulo de dominio.

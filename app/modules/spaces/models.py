@@ -61,7 +61,7 @@ class ReservaEspacio(Base):
                 ),
                 "&&",
             ),
-            where=text("estado_reserva = 'Aprobada'"),
+            where=text("estado_reserva IN ('Aprobada', 'En_Uso')"),
             name="excl_reserva_aprobada_sin_solapamiento",
             using="gist",
         ),
@@ -98,3 +98,6 @@ class BloqueoEspacio(Base):
     hora_inicio: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     hora_fin: Mapped[Optional[time]] = mapped_column(Time, nullable=True)
     motivo: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )

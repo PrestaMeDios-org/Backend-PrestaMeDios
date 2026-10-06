@@ -73,7 +73,9 @@ async def crear_reserva(
     franja es rechazado por la base de datos (ExcludeConstraint GIST);
     se traduce a HTTP 409.
     """
-    reserva = ReservaEspacio(**payload.model_dump())
+    data = payload.model_dump()
+    data["estado_reserva"] = "Pendiente"
+    reserva = ReservaEspacio(**data)
     db.add(reserva)
     try:
         await db.commit()
@@ -91,14 +93,20 @@ async def crear_reserva(
 async def listar_reservas(
     id_espacio: int | None = Query(default=None),
     fecha: date | None = Query(default=None),
+    estado: str | None = Query(default=None),
+    id_usuario: int | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> list[ReservaEspacio]:
-    """Lista reservas, filtrables por espacio y/o fecha."""
+    """Lista reservas, filtrables por espacio, fecha, estado y/o usuario."""
     stmt = select(ReservaEspacio)
     if id_espacio is not None:
         stmt = stmt.where(ReservaEspacio.id_espacio == id_espacio)
     if fecha is not None:
         stmt = stmt.where(ReservaEspacio.fecha_reserva == fecha)
+    if estado is not None:
+        stmt = stmt.where(ReservaEspacio.estado_reserva == estado)
+    if id_usuario is not None:
+        stmt = stmt.where(ReservaEspacio.id_usuario == id_usuario)
     result = await db.execute(stmt)
     return list(result.scalars().all())
 
@@ -123,6 +131,23 @@ async def actualizar_estado_reserva(
     if payload.motivo_rechazo:
         reserva.motivo = payload.motivo_rechazo
     try:
+        await db.flush()
+        if payload.nuevo_estado == "Aprobada":
+            stmt = select(ReservaEspacio).where(
+                ReservaEspacio.id_espacio == reserva.id_espacio,
+                ReservaEspacio.fecha_reserva == reserva.fecha_reserva,
+                ReservaEspacio.estado_reserva == "Pendiente",
+                ReservaEspacio.id_reserva != reserva.id_reserva,
+                ReservaEspacio.hora_inicio < reserva.hora_fin,
+                ReservaEspacio.hora_fin > reserva.hora_inicio,
+            )
+            solapadas = (await db.execute(stmt)).scalars().all()
+            for otra in solapadas:
+                otra.estado_reserva = "Rechazada"
+                otra.motivo = (
+                    "Reserva descartada automáticamente: el espacio fue "
+                    "adjudicado a otra solicitud para la misma franja horaria."
+                )
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
