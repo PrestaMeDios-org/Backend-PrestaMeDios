@@ -4,6 +4,8 @@ Monolito Modular por Dominio: cada módulo bajo ``app.modules`` expone su
 propio router, que se registra aquí de forma explícita.
 """
 
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -17,7 +19,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:8443"],
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:8443").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
