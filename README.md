@@ -376,9 +376,10 @@ Dado que el equipo consta de 5 integrantes y un plazo limitado de 16 semanas, Sc
 * **Condición:** El administrador detecta que los datos son incorrectos o la identidad no es válida.
 * **Acciones:**
 1. El administrador selecciona la opción de rechazar la solicitud.
+2. El administrador registra obligatoriamente el motivo del rechazo.
 
 
-* **Respuesta del sistema:** El sistema elimina la petición e impide el acceso del usuario.
+* **Respuesta del sistema:** El sistema marca la cuenta en estado "Rechazada" conservando el registro y el motivo para auditoría, e impide el acceso del usuario. El usuario podrá volver a enviar el formulario de registro con el mismo correo electrónico, en cuyo caso la cuenta retorna al estado "Pendiente en aprobación".
 
 
 

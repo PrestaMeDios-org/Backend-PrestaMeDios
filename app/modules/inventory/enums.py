@@ -6,12 +6,8 @@ Viven en su propio archivo para que ``models.py`` (persistencia) y
 
 from enum import StrEnum
 
-
-class SedeEnum(StrEnum):
-    """Sedes físicas donde se aloja el equipamiento."""
-
-    USHUAIA = "Ushuaia"
-    RIO_GRANDE = "Río Grande"
+# Re-export: la definición canónica de sede vive en `app.core.enums` (SPEC-01, D-01).
+from app.core.enums import SedeEnum  # noqa: F401
 
 
 class EstadoUnidadEnum(StrEnum):
