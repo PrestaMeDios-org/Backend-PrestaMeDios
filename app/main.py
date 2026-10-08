@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.modules.inventory.router import router as inventory_router
 from app.modules.spaces.router import router as spaces_router
+from app.modules.loans.router import router as loans_router
 
 app = FastAPI(
     title="PrestaMeDios API - Catálogo e Inventario",
@@ -37,6 +38,12 @@ app.include_router(
     spaces_router,
     prefix="/api/v1/spaces",
     tags=["Espacios e Infraestructura"],
+)
+
+app.include_router(
+    loans_router,
+    prefix="/api/v1/loans",
+    tags=["Préstamos y Solicitudes"],
 )
 
 
