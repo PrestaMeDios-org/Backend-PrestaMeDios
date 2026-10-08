@@ -1,3 +1,8 @@
+> **Documento académico — Especificación de Requisitos de Software (IEEE 830)**
+>
+> Fuente de verdad funcional del proyecto PrestaMeDios: requisitos (USR, PRE, RES, NOV, GLO, IA), casos de uso, diseño e iteraciones.
+> Ubicación anterior: `README.md` (movido el 2026-10-08). La guía técnica de instalación y uso del backend está en el [`README.md`](../README.md) del repositorio.
+
 # PrestaMeDios
 
 **Sistema de Gestión de Recursos y Reservas para el Laboratorio de Medios Audiovisuales**
