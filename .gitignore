@@ -5,3 +5,7 @@ __pycache__/
 *$py.class
 .env
 .pytest_cache/
+.coverage
+htmlcov/
+*.log
+uvicorn.err
