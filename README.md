@@ -1088,6 +1088,8 @@ Se implementará una Arquitectura Intermedia (Monolito Modular por Dominio / API
 * **Capa de Persistencia (Base de Datos):** El motor relacional PostgreSQL se sitúa en una capa aislada. Su función es fundamental no solo para el almacenamiento persistente, sino para garantizar la integridad transaccional (ACID): se encarga de abortar las peticiones concurrentes y evitar los solapamientos temporales sobre un mismo recurso físico mediante restricciones de exclusión.
 * **Integración Externa (Agente MCP - Subsistema 6):** El chatbot con inteligencia artificial se despliega como un servicio o cliente independiente. Para preservar la seguridad del sistema y no eludir las validaciones de negocio (como el límite de préstamos de 4 o 15 días), el Agente MCP no se conecta a PostgreSQL de forma directa. En su lugar, lee los contratos OpenAPI expuestos por FastAPI y ejecuta las reservas mediante peticiones REST, exactamente de la misma manera que lo hace el cliente web de React.
 
+En el módulo `spaces`, las reservas pendientes no ocupan el espacio hasta ser aprobadas; las aprobadas y las que están en uso no pueden solaparse. Las transiciones válidas son `Pendiente` → `Aprobada`/`Rechazada`/`Cancelada`, `Aprobada` → `En_Uso`/`Cancelada` y `En_Uso` → `Finalizada`. Los bloqueos pueden cubrir días completos o una franja diaria con ambas horas entre las 09:00 y las 16:00. La consulta de disponibilidad devuelve los intervalos libres por espacio, calculados restando las reservas activas y los bloqueos al horario operativo; las escrituras incompatibles responden con HTTP 409.
+
 > **Figura 8.** Borrador de Diagrama de Infraestructura de PrestaMeDios
 > **Link v1:** Diagrama de Infraestructura v1
 

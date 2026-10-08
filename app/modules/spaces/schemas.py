@@ -8,9 +8,9 @@ directamente los modelos ORM de SQLAlchemy.
 
 from datetime import date, datetime, time
 from enum import Enum
-from typing import Literal, Optional
+from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +68,8 @@ class ReservaEspacioBase(BaseModel):
     @classmethod
     def hora_dentro_de_franja(cls, v: time) -> time:
         """GLO-02: la franja horaria debe estar entre las 09:00 y las 16:00."""
+        if v.tzinfo is not None:
+            raise ValueError("Las horas deben expresarse como hora local sin zona horaria.")
         if v < time(9, 0) or v > time(16, 0):
             raise ValueError("La hora debe estar contenida entre las 09:00 y las 16:00 hs (GLO-02).")
         return v
@@ -99,7 +101,7 @@ class ReservaEspacioResponse(ReservaEspacioBase):
 class ReservaEspacioUpdateStatus(BaseModel):
     """Payload para la aprobación/rechazo/cancelación administrativa."""
 
-    nuevo_estado: Literal["Aprobada", "Rechazada", "Cancelada"] = Field(..., examples=["Aprobada"])
+    nuevo_estado: EstadoReserva = Field(..., examples=["Aprobada"])
     motivo_rechazo: Optional[str] = Field(default=None, max_length=500, examples=["Espacio en mantenimiento"])
 
     @model_validator(mode="after")
@@ -122,18 +124,19 @@ class BloqueoEspacioCreate(BaseModel):
     hora_fin: Optional[time] = Field(default=None, examples=["16:00:00"])
     motivo: str = Field(..., max_length=500, examples=["Mantenimiento eléctrico"])
 
-    @field_validator("hora_fin")
-    @classmethod
-    def hora_fin_posterior_a_inicio(cls, v: Optional[time], info: ValidationInfo) -> Optional[time]:
-        hora_inicio = info.data.get("hora_inicio")
-        if v is not None and hora_inicio is not None and v <= hora_inicio:
-            raise ValueError("`hora_fin` debe ser posterior a `hora_inicio`.")
-        return v
-
     @model_validator(mode="after")
-    def fecha_fin_no_anterior(self) -> "BloqueoEspacioCreate":
+    def rango_valido(self) -> "BloqueoEspacioCreate":
         if self.fecha_fin < self.fecha_inicio:
             raise ValueError("`fecha_fin` no puede ser anterior a `fecha_inicio`.")
+        if (self.hora_inicio is None) != (self.hora_fin is None):
+            raise ValueError("`hora_inicio` y `hora_fin` deben informarse juntas para un bloqueo parcial.")
+        if self.hora_inicio is not None and self.hora_fin is not None:
+            if self.hora_inicio.tzinfo is not None or self.hora_fin.tzinfo is not None:
+                raise ValueError("Las horas deben expresarse como hora local sin zona horaria.")
+            if self.hora_inicio < time(9, 0) or self.hora_fin > time(16, 0):
+                raise ValueError("El bloqueo debe estar contenido entre las 09:00 y las 16:00 hs (GLO-02).")
+            if self.hora_fin <= self.hora_inicio:
+                raise ValueError("`hora_fin` debe ser posterior a `hora_inicio`.")
         return self
 
 
