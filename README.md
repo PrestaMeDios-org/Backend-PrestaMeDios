@@ -35,7 +35,7 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 
 | Módulo | Prefijo | Requisitos | Estado |
 | --- | --- | --- | --- |
-| `users` | `/api/v1/auth`, `/api/v1/users` | USR-01, USR-04, USR-05, GLO-01 | Implementado |
+| `users` | `/api/v1/auth`, `/api/v1/users` | USR-01, USR-03, USR-04, USR-05, GLO-01 | Implementado |
 | `config` | `/api/v1/config` | GLO-03 | Implementado |
 | `inventory` | `/api/v1/inventory` | PRE-01, PRE-02, PRE-12, PRE-14, PRE-19 | Implementado |
 | `spaces` | `/api/v1/spaces` | RES-01…RES-05, GLO-02, GLO-04 | Implementado |
@@ -44,6 +44,8 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 | `assistant` | — | IA-01…IA-03 | Pendiente |
 
 **Roles:** `SUPERADMIN` (ambas sedes) · `ADMIN_LOCAL` (una sede) · `DOCENTE` · `ESTUDIANTE`. Los usuarios sólo operan sobre los recursos de su sede, excepto el Superadministrador.
+
+**Seguridad transversal.** Todos los endpoints, salvo registro, login y `/health`, requieren sesión. El solicitante de una reserva es siempre el usuario autenticado; los recursos creados por un administrador local reciben su sede automáticamente; un recurso de otra sede se responde como inexistente (`404`). Las cuentas creadas o restablecidas por un administrador deben cambiar la contraseña antes de operar (`403 CAMBIO_PASSWORD_REQUERIDO`).
 
 ---
 
@@ -96,6 +98,8 @@ Definidas en `.env` (ver [`.env.example`](.env.example)). **Nunca versionar `.en
 | `TEST_DATABASE_URL` | Sólo tests | — | Base dedicada; su nombre debe contener `test` |
 | `BOOTSTRAP_SUPERADMIN_PASSWORD` | No | — | Contraseña para el CLI sin prompt interactivo |
 
+Fechas y horas de reservas se interpretan en la zona del laboratorio, `America/Argentina/Ushuaia` (dependencia `tzdata`).
+
 Las **reglas operativas** del laboratorio (plazos de préstamo, horario, anticipación mínima, tolerancias) no son variables de entorno: se administran desde el Panel de Parámetros Globales (`/api/v1/config/parametros`) y se siembran con la migración `0005`.
 
 ---
@@ -132,10 +136,12 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | --- | --- | --- |
 | Autenticación | `POST /api/v1/auth/register` | Autorregistro de Estudiante o Docente |
 | | `POST /api/v1/auth/login` | Inicio de sesión (JWT) |
-| | `GET /api/v1/auth/me` | Perfil de la sesión actual |
+| | `GET /api/v1/auth/me` · `PATCH /api/v1/auth/me` | Perfil propio; editar teléfono y email |
+| | `POST /api/v1/auth/me/password` | Cambiar la contraseña (emite un token nuevo) |
 | Usuarios | `GET /api/v1/users` | Directorio con filtros y aislamiento de sede |
 | | `GET /api/v1/users/{id}` | Detalle administrativo |
 | | `POST /api/v1/users` | Alta directa (Superadministrador) |
+| | `PATCH /api/v1/users/{id}` | Editar datos, rol, sede o restablecer la contraseña |
 | | `PATCH /api/v1/users/{id}/estado` | Aprobar, rechazar, suspender, dar de baja, reactivar |
 | Configuración | `GET /api/v1/config/parametros[/{clave}]` | Parámetros operativos |
 | | `PUT /api/v1/config/parametros/{clave}` | Modificar (Superadministrador, con control de versión) |
