@@ -10,3 +10,4 @@ python-dotenv
 PyJWT>=2.8
 pwdlib[argon2]>=0.2
 email-validator>=2.1
+tzdata
