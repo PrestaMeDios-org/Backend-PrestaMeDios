@@ -8,3 +8,6 @@ alembic
 psycopg2-binary
 python-dotenv
 tzdata
+PyJWT>=2.8
+pwdlib[argon2]>=0.2
+email-validator>=2.1

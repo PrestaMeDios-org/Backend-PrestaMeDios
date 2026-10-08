@@ -4,29 +4,57 @@ Monolito Modular por Dominio: cada módulo bajo ``app.modules`` expone su
 propio router, que se registra aquí de forma explícita.
 """
 
-import os
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.errors import AppError, app_error_handler
+from app.core.settings import get_settings
+from app.modules.config.router import router as config_router
 from app.modules.inventory.router import router as inventory_router
 from app.modules.spaces.router import router as spaces_router
 from app.modules.loans.router import router as loans_router
+from app.modules.users.router import auth_router, users_router
+
+# Falla al arrancar si falta configuración obligatoria (p. ej. JWT_SECRET_KEY).
+settings = get_settings()
 
 app = FastAPI(
-    title="PrestaMeDios API - Catálogo e Inventario",
-    version="0.1.0",
+    title="PrestaMeDios API",
+    description=(
+        "API del Laboratorio de Medios Audiovisuales (ICSE — UNTDF): identidad y permisos, "
+        "catálogo e inventario, reservas de espacios y configuración global."
+    ),
+    version="0.2.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:8443").split(","),
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Registro explícito de routers por módulo de dominio.
+app.add_exception_handler(AppError, app_error_handler)
+
+app.include_router(
+    auth_router,
+    prefix="/api/v1/auth",
+    tags=["Autenticación"],
+)
+
+app.include_router(
+    users_router,
+    prefix="/api/v1/users",
+    tags=["Usuarios"],
+)
+
+app.include_router(
+    config_router,
+    prefix="/api/v1/config",
+    tags=["Configuración Global"],
+)
+
 app.include_router(
     inventory_router,
     prefix="/api/v1/inventory",
