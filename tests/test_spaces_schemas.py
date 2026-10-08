@@ -1,6 +1,6 @@
 """Tests de contratos Pydantic del dominio spaces (API-First)."""
 
-from datetime import date, time
+from datetime import date, time, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -52,6 +52,12 @@ class TestReservaEspacioCreate:
         with pytest.raises(ValidationError):
             ReservaEspacioCreate(**_reserva_valida(hora_inicio=time(12, 0), hora_fin=time(11, 0)))
 
+    def test_horas_con_zona_horaria_rechazadas(self):
+        with pytest.raises(ValidationError):
+            ReservaEspacioCreate(
+                **_reserva_valida(hora_inicio=time(10, 0, tzinfo=timezone.utc))
+            )
+
 
 class TestReservaEspacioUpdateStatus:
     def test_aprobada_sin_motivo_ok(self):
@@ -68,7 +74,11 @@ class TestReservaEspacioUpdateStatus:
 
     def test_estado_invalido_rechazado(self):
         with pytest.raises(ValidationError):
-            ReservaEspacioUpdateStatus(nuevo_estado="En_Uso")
+            ReservaEspacioUpdateStatus(nuevo_estado="No_Existe")
+
+    def test_estado_en_uso_aceptado_por_el_contrato(self):
+        update = ReservaEspacioUpdateStatus(nuevo_estado="En_Uso")
+        assert update.nuevo_estado == EstadoReserva.EN_USO
 
 
 class TestBloqueoEspacioCreate:
@@ -100,6 +110,38 @@ class TestBloqueoEspacioCreate:
             motivo="Contingencia",
         )
         assert b.hora_inicio is None and b.hora_fin is None
+
+    def test_franja_parcial_requiere_ambas_horas(self):
+        with pytest.raises(ValidationError):
+            BloqueoEspacioCreate(
+                id_espacio=1,
+                fecha_inicio=date(2026, 10, 12),
+                fecha_fin=date(2026, 10, 12),
+                hora_inicio=time(10, 0),
+                motivo="Mantenimiento",
+            )
+
+    def test_franja_parcial_esta_dentro_del_horario_operativo(self):
+        with pytest.raises(ValidationError):
+            BloqueoEspacioCreate(
+                id_espacio=1,
+                fecha_inicio=date(2026, 10, 12),
+                fecha_fin=date(2026, 10, 12),
+                hora_inicio=time(8, 30),
+                hora_fin=time(10, 0),
+                motivo="Mantenimiento",
+            )
+
+    def test_franja_parcial_valida(self):
+        b = BloqueoEspacioCreate(
+            id_espacio=1,
+            fecha_inicio=date(2026, 10, 12),
+            fecha_fin=date(2026, 10, 12),
+            hora_inicio=time(10, 0),
+            hora_fin=time(11, 0),
+            motivo="Mantenimiento",
+        )
+        assert b.hora_inicio == time(10, 0) and b.hora_fin == time(11, 0)
 
 
 class TestEspacioYFiltro:
