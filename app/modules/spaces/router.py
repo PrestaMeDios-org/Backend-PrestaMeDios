@@ -8,10 +8,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.modules.spaces.availability import (
+    bloqueo_intervalo_en_fecha,
+    bloqueo_solapa_reserva,
+    intervalos_libres,
+)
 from app.modules.spaces.models import BloqueoEspacio, Espacio, ReservaEspacio
 from app.modules.spaces.schemas import (
     BloqueoEspacioCreate,
     BloqueoEspacioResponse,
+    EstadoReserva,
     EspacioCreate,
     EspacioResponse,
     ReservaEspacioCreate,
@@ -20,6 +26,69 @@ from app.modules.spaces.schemas import (
 )
 
 router = APIRouter()
+
+_TRANSICIONES_RESERVA = {
+    EstadoReserva.PENDIENTE: {
+        EstadoReserva.APROBADA,
+        EstadoReserva.RECHAZADA,
+        EstadoReserva.CANCELADA,
+    },
+    EstadoReserva.APROBADA: {EstadoReserva.EN_USO, EstadoReserva.CANCELADA},
+    EstadoReserva.EN_USO: {EstadoReserva.FINALIZADA},
+    EstadoReserva.RECHAZADA: set(),
+    EstadoReserva.CANCELADA: set(),
+    EstadoReserva.FINALIZADA: set(),
+}
+
+
+async def _bloquear_espacio(db: AsyncSession, id_espacio: int) -> Espacio:
+    """Serializa escrituras del mismo espacio para proteger reglas entre tablas."""
+    stmt = select(Espacio).where(Espacio.id_espacio == id_espacio).with_for_update()
+    espacio = (await db.execute(stmt)).scalar_one_or_none()
+    if espacio is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Espacio con id={id_espacio} no encontrado.",
+        )
+    return espacio
+
+
+async def _bloqueos_de_reserva(
+    db: AsyncSession, reserva: ReservaEspacio
+) -> list[BloqueoEspacio]:
+    stmt = select(BloqueoEspacio).where(
+        BloqueoEspacio.id_espacio == reserva.id_espacio,
+        BloqueoEspacio.fecha_inicio <= reserva.fecha_reserva,
+        BloqueoEspacio.fecha_fin >= reserva.fecha_reserva,
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def _validar_reserva_no_bloqueada(db: AsyncSession, reserva: ReservaEspacio) -> None:
+    bloqueos = await _bloqueos_de_reserva(db, reserva)
+    if any(bloqueo_solapa_reserva(bloqueo, reserva) for bloqueo in bloqueos):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No se puede reservar: el espacio está bloqueado en esa franja horaria.",
+        )
+
+
+async def _validar_sin_reservas_solapadas(
+    db: AsyncSession, reserva: ReservaEspacio
+) -> None:
+    stmt = select(ReservaEspacio).where(
+        ReservaEspacio.id_espacio == reserva.id_espacio,
+        ReservaEspacio.fecha_reserva == reserva.fecha_reserva,
+        ReservaEspacio.estado_reserva.in_(["Aprobada", "En_Uso"]),
+        ReservaEspacio.id_reserva != reserva.id_reserva,
+        ReservaEspacio.hora_inicio < reserva.hora_fin,
+        ReservaEspacio.hora_fin > reserva.hora_inicio,
+    )
+    if (await db.execute(stmt)).scalars().first() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No se puede aprobar: ya existe otra reserva aprobada o en uso que solapa esa franja.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -69,22 +138,16 @@ async def crear_reserva(
 ) -> ReservaEspacio:
     """Crea una reserva en estado 'Pendiente'.
 
-    El solapamiento de reservas 'Aprobadas' sobre el mismo espacio y
-    franja es rechazado por la base de datos (ExcludeConstraint GIST);
-    se traduce a HTTP 409.
+    Los bloqueos existentes impiden generar nuevas solicitudes. El bloqueo
+    transaccional del espacio serializa este control con la creación de bloqueos.
     """
     data = payload.model_dump()
     data["estado_reserva"] = "Pendiente"
     reserva = ReservaEspacio(**data)
+    await _bloquear_espacio(db, reserva.id_espacio)
+    await _validar_reserva_no_bloqueada(db, reserva)
     db.add(reserva)
-    try:
-        await db.commit()
-    except IntegrityError as exc:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="El espacio ya tiene una reserva aprobada en esa franja horaria.",
-        ) from exc
+    await db.commit()
     await db.refresh(reserva)
     return reserva
 
@@ -120,19 +183,41 @@ async def actualizar_estado_reserva(
     payload: ReservaEspacioUpdateStatus,
     db: AsyncSession = Depends(get_db),
 ) -> ReservaEspacio:
-    """Aprobación/rechazo/cancelación administrativa (RES-05)."""
-    reserva = await db.get(ReservaEspacio, id_reserva)
+    """Aplica una transición válida del ciclo de vida de una reserva (RES-05)."""
+    reserva = (
+        await db.execute(
+            select(ReservaEspacio)
+            .where(ReservaEspacio.id_reserva == id_reserva)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
     if reserva is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Reserva con id={id_reserva} no encontrada.",
         )
-    reserva.estado_reserva = payload.nuevo_estado
+    await _bloquear_espacio(db, reserva.id_espacio)
+
+    estado_actual = EstadoReserva(reserva.estado_reserva)
+    if payload.nuevo_estado not in _TRANSICIONES_RESERVA[estado_actual]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"No se puede cambiar una reserva de '{estado_actual.value}' "
+                f"a '{payload.nuevo_estado.value}'."
+            ),
+        )
+
+    if payload.nuevo_estado in {EstadoReserva.APROBADA, EstadoReserva.EN_USO}:
+        await _validar_sin_reservas_solapadas(db, reserva)
+        await _validar_reserva_no_bloqueada(db, reserva)
+
+    reserva.estado_reserva = payload.nuevo_estado.value
     if payload.motivo_rechazo:
         reserva.motivo = payload.motivo_rechazo
     try:
         await db.flush()
-        if payload.nuevo_estado == "Aprobada":
+        if payload.nuevo_estado == EstadoReserva.APROBADA:
             stmt = select(ReservaEspacio).where(
                 ReservaEspacio.id_espacio == reserva.id_espacio,
                 ReservaEspacio.fecha_reserva == reserva.fecha_reserva,
@@ -153,7 +238,7 @@ async def actualizar_estado_reserva(
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="No se puede aprobar: ya existe otra reserva aprobada que solapa esa franja.",
+            detail="No se puede completar el cambio: el espacio ya está ocupado en esa franja horaria.",
         ) from exc
     await db.refresh(reserva)
     return reserva
@@ -172,7 +257,23 @@ async def crear_bloqueo(
     db: AsyncSession = Depends(get_db),
 ) -> BloqueoEspacio:
     """Bloquea un espacio por contingencia o mantenimiento."""
+    await _bloquear_espacio(db, payload.id_espacio)
     bloqueo = BloqueoEspacio(**payload.model_dump())
+    stmt = select(ReservaEspacio).where(
+        ReservaEspacio.id_espacio == payload.id_espacio,
+        ReservaEspacio.fecha_reserva >= payload.fecha_inicio,
+        ReservaEspacio.fecha_reserva <= payload.fecha_fin,
+        ReservaEspacio.estado_reserva.in_(["Aprobada", "En_Uso"]),
+    )
+    reservas = (await db.execute(stmt)).scalars().all()
+    if any(
+        bloqueo_solapa_reserva(bloqueo, reserva)
+        for reserva in reservas
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No se puede crear el bloqueo: existe una reserva aprobada o en uso en esa franja.",
+        )
     db.add(bloqueo)
     await db.commit()
     await db.refresh(bloqueo)
@@ -208,40 +309,62 @@ async def consultar_disponibilidad(
     id_espacio: int | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Devuelve las franjas ocupadas de un espacio en una fecha.
+    """Devuelve las franjas ocupadas y libres para cada espacio consultado.
 
-    Los turnos libres se derivan restando las franjas ocupadas del
-    rango operativo 09:00–16:00 hs (GLO-02). Se filtra por ``id_sede``
-    a través de la relación espacio↔sede.
+    Los turnos libres se derivan de 09:00–16:00 hs (GLO-02), sin asumir
+    una duración fija entre reservas. Los bloqueos parciales se aplican
+    en cada fecha incluida en su rango.
     """
-    stmt_res = (
-        select(ReservaEspacio)
-        .join(Espacio, ReservaEspacio.id_espacio == Espacio.id_espacio)
-        .where(
+    stmt_espacios = select(Espacio).where(Espacio.id_sede == id_sede)
+    if id_espacio is not None:
+        stmt_espacios = stmt_espacios.where(Espacio.id_espacio == id_espacio)
+    espacios = list((await db.execute(stmt_espacios)).scalars().all())
+    ids_espacios = [espacio.id_espacio for espacio in espacios]
+
+    reservas: list[ReservaEspacio] = []
+    bloqueos: list[BloqueoEspacio] = []
+    if ids_espacios:
+        stmt_res = select(ReservaEspacio).where(
             ReservaEspacio.fecha_reserva == fecha,
             ReservaEspacio.estado_reserva.in_(["Aprobada", "En_Uso"]),
-            Espacio.id_sede == id_sede,
+            ReservaEspacio.id_espacio.in_(ids_espacios),
         )
-    )
-    stmt_blo = (
-        select(BloqueoEspacio)
-        .join(Espacio, BloqueoEspacio.id_espacio == Espacio.id_espacio)
-        .where(
+        stmt_blo = select(BloqueoEspacio).where(
             BloqueoEspacio.fecha_inicio <= fecha,
             BloqueoEspacio.fecha_fin >= fecha,
-            Espacio.id_sede == id_sede,
+            BloqueoEspacio.id_espacio.in_(ids_espacios),
         )
-    )
-    if id_espacio is not None:
-        stmt_res = stmt_res.where(ReservaEspacio.id_espacio == id_espacio)
-        stmt_blo = stmt_blo.where(BloqueoEspacio.id_espacio == id_espacio)
+        reservas = list((await db.execute(stmt_res)).scalars().all())
+        bloqueos = list((await db.execute(stmt_blo)).scalars().all())
 
-    reservas = (await db.execute(stmt_res)).scalars().all()
-    bloqueos = (await db.execute(stmt_blo)).scalars().all()
+    intervalos_por_espacio = []
+    for espacio in espacios:
+        ocupados = [
+            (reserva.hora_inicio, reserva.hora_fin)
+            for reserva in reservas
+            if reserva.id_espacio == espacio.id_espacio
+        ]
+        ocupados.extend(
+            intervalo
+            for bloqueo in bloqueos
+            if bloqueo.id_espacio == espacio.id_espacio
+            if (intervalo := bloqueo_intervalo_en_fecha(bloqueo, fecha)) is not None
+        )
+        intervalos_por_espacio.append(
+            {
+                "id_espacio": espacio.id_espacio,
+                "intervalos_libres": [
+                    {"hora_inicio": inicio, "hora_fin": fin}
+                    for inicio, fin in intervalos_libres(ocupados)
+                ],
+            }
+        )
+
     return {
         "fecha": fecha,
         "id_sede": id_sede,
         "id_espacio": id_espacio,
         "reservas_ocupadas": [ReservaEspacioResponse.model_validate(r) for r in reservas],
         "bloqueos": [BloqueoEspacioResponse.model_validate(b) for b in bloqueos],
+        "intervalos_disponibles": intervalos_por_espacio,
     }
