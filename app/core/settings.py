@@ -4,13 +4,23 @@ Los secretos viven **sólo** en el entorno / `.env`; nunca en código ni en
 parámetros globales (RN-23).
 """
 
+from datetime import datetime
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 JWT_ALGORITHM = "HS256"
 JWT_ISSUER = "prestamedios-api"
+
+# Ambas sedes comparten zona horaria (SPEC-02 D-05, RN-28).
+ZONA_HORARIA_LAB = ZoneInfo("America/Argentina/Ushuaia")
+
+
+def ahora_lab() -> datetime:
+    """Fecha y hora actuales en la zona del laboratorio."""
+    return datetime.now(ZONA_HORARIA_LAB)
 
 
 class Settings(BaseSettings):

@@ -28,11 +28,10 @@ bearer_scheme = HTTPBearer(auto_error=False, description="Access token JWT (SPEC
 _WWW_AUTH = {"WWW-Authenticate": "Bearer"}
 
 
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
-    db: AsyncSession = Depends(get_db),
+async def _usuario_autenticado(
+    credentials: HTTPAuthorizationCredentials | None,
+    db: AsyncSession,
 ) -> Usuario:
-    """Resuelve el usuario autenticado y activo a partir del header ``Authorization``."""
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise AppError(401, "NO_AUTENTICADO", "Se requiere iniciar sesión.", headers=_WWW_AUTH)
 
@@ -47,6 +46,36 @@ async def get_current_user(
             "TOKEN_REVOCADO",
             "La sesión fue cerrada por un cambio en tu cuenta.",
             headers=_WWW_AUTH,
+        )
+    return usuario
+
+
+async def get_current_user_permitiendo_cambio(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> Usuario:
+    """Usuario autenticado aunque tenga pendiente el cambio obligatorio de contraseña.
+
+    Sólo para ``GET /auth/me`` y ``POST /auth/me/password`` (SPEC-02 RN-33).
+    """
+    return await _usuario_autenticado(credentials, db)
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> Usuario:
+    """Resuelve el usuario autenticado y activo a partir del header ``Authorization``.
+
+    Bloquea a quien deba cambiar su contraseña (SPEC-02 RN-33): así ningún
+    endpoint protegido puede olvidar esa regla.
+    """
+    usuario = await _usuario_autenticado(credentials, db)
+    if usuario.debe_cambiar_password:
+        raise AppError(
+            403,
+            "CAMBIO_PASSWORD_REQUERIDO",
+            "Tenés que cambiar tu contraseña antes de continuar.",
         )
     return usuario
 
@@ -83,3 +112,26 @@ def resolver_alcance_sede(usuario: Usuario, sede_solicitada: SedeEnum | None) ->
             403, "SEDE_FUERA_DE_ALCANCE", "No tenés jurisdicción sobre la sede solicitada."
         )
     return [usuario.sede]
+
+
+def sede_para_alta(usuario: Usuario, sede_indicada: SedeEnum | None) -> SedeEnum:
+    """Sede de un recurso nuevo (PRE-19, SPEC-02 §2, RN-31).
+
+    - ``ADMIN_LOCAL``: su sede; indicar otra responde ``403 SEDE_FUERA_DE_ALCANCE``.
+    - ``SUPERADMIN``: obligatoria (``422 SEDE_REQUERIDA``).
+    """
+    if usuario.rol == RolUsuario.SUPERADMIN:
+        if sede_indicada is None:
+            raise AppError(422, "SEDE_REQUERIDA", "Indicá la sede del recurso.")
+        return sede_indicada
+    assert usuario.sede is not None
+    if sede_indicada is not None and sede_indicada != usuario.sede:
+        raise AppError(
+            403, "SEDE_FUERA_DE_ALCANCE", "No tenés jurisdicción sobre la sede solicitada."
+        )
+    return usuario.sede
+
+
+def puede_ver_sede(usuario: Usuario, sede: SedeEnum | None) -> bool:
+    """¿El recurso de ``sede`` está dentro de la jurisdicción de ``usuario``?"""
+    return usuario.rol == RolUsuario.SUPERADMIN or (sede is not None and sede == usuario.sede)

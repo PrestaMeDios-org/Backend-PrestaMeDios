@@ -117,6 +117,7 @@ class UsuarioPublico(UsuarioResumen):
     """Perfil propio (``/auth/register``, ``/auth/login``, ``/auth/me``)."""
 
     telefono: str | None = Field(default=None, examples=["+54 2901 555123"])
+    debe_cambiar_password: bool = Field(default=False, examples=[False])
 
 
 class UsuarioDetalle(UsuarioPublico):
@@ -174,4 +175,79 @@ class CambioEstadoRequest(BaseModel):
                 raise ValueError("`suspendido_hasta` sólo se admite con nuevo_estado SUSPENDIDO.")
             if self.suspendido_hasta <= datetime.now(UTC):
                 raise ValueError("`suspendido_hasta` debe ser una fecha futura.")
+        return self
+
+
+# ── SPEC-02 · Gestión de cuenta ──────────────────────────────────────────────
+
+
+class PerfilUpdate(BaseModel):
+    """Edición de datos de contacto propios (UC-10, USR-03).
+
+    Sólo ``telefono`` y ``email``; el resto de los datos están protegidos.
+    Cambiar el email exige ``password_actual`` (RN-32).
+    """
+
+    model_config = _INPUT_CONFIG
+
+    telefono: Telefono | None = Field(default=None, examples=["+54 2901 555123"])
+    email: EmailStr | None = Field(default=None, max_length=254, examples=["lucia@gmail.com"])
+    password_actual: str | None = Field(default=None, min_length=1, max_length=128)
+
+    _norm_email = field_validator("email", mode="before")(_normalizar_email)
+
+    @model_validator(mode="after")
+    def _reglas(self) -> "PerfilUpdate":
+        enviados = self.model_fields_set - {"password_actual"}
+        if not enviados:
+            raise ValueError("Indicá al menos un dato a modificar (telefono o email).")
+        if "password_actual" in self.model_fields_set and "email" not in self.model_fields_set:
+            raise ValueError("`password_actual` sólo se usa para cambiar el email.")
+        if "email" in self.model_fields_set and self.email is None:
+            raise ValueError("El email no puede quedar vacío.")
+        return self
+
+
+class CambioPasswordRequest(BaseModel):
+    """Cambio de contraseña propia (UC-11)."""
+
+    model_config = _INPUT_CONFIG
+
+    password_actual: str = Field(..., min_length=1, max_length=128)
+    password_nueva: Password
+
+    @model_validator(mode="after")
+    def _reglas(self) -> "CambioPasswordRequest":
+        validar_politica_password(self.password_nueva, None)
+        if self.password_nueva == self.password_actual:
+            raise ValueError("La contraseña nueva debe ser distinta de la actual.")
+        return self
+
+
+class UsuarioAdminUpdate(BaseModel):
+    """Edición administrativa de un perfil (UC-12, USR-04). Al menos un campo."""
+
+    model_config = _INPUT_CONFIG
+
+    nombre: NombrePersona | None = None
+    apellido: NombrePersona | None = None
+    dni: Dni | None = None
+    telefono: Telefono | None = None
+    email: EmailStr | None = Field(default=None, max_length=254)
+    rol: RolUsuario | None = None
+    sede: SedeEnum | None = None
+    password_nueva: Password | None = None
+
+    _norm_email = field_validator("email", mode="before")(_normalizar_email)
+
+    @model_validator(mode="after")
+    def _reglas(self) -> "UsuarioAdminUpdate":
+        if not self.model_fields_set:
+            raise ValueError("Indicá al menos un dato a modificar.")
+        no_anulables = {"nombre", "apellido", "dni", "email", "rol", "password_nueva"}
+        for campo in no_anulables & self.model_fields_set:
+            if getattr(self, campo) is None:
+                raise ValueError(f"`{campo}` no puede ser null.")
+        if self.password_nueva is not None:
+            validar_politica_password(self.password_nueva, self.email)
         return self

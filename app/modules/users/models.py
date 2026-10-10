@@ -15,11 +15,13 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    false,
     func,
     text,
 )
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum, enum_values
@@ -70,6 +72,7 @@ class Usuario(Base):
     motivo_estado: Mapped[str | None] = mapped_column(String(500))
     suspendido_hasta: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     token_version: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+    debe_cambiar_password: Mapped[bool] = mapped_column(default=False, server_default=false())
     ultimo_login_en: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     aprobado_por_id: Mapped[int | None] = mapped_column(
         ForeignKey("usuarios.id", ondelete="SET NULL")
@@ -99,6 +102,28 @@ class UsuarioHistorialEstado(Base):
     estado_nuevo: Mapped[EstadoCuenta] = mapped_column(ESTADO_CUENTA_ENUM)
     motivo: Mapped[str | None] = mapped_column(String(500))
     actor_id: Mapped[int | None] = mapped_column(ForeignKey("usuarios.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class UsuarioHistorialCambios(Base):
+    """Traza inmutable de ediciones de perfil (SPEC-02 RN-34, USR-08).
+
+    ``cambios`` = ``{campo: [antes, después]}``; nunca contiene contraseñas.
+    """
+
+    __tablename__ = "usuarios_historial_cambios"
+    __table_args__ = (
+        Index(
+            "ix_usuarios_historial_cambios_usuario_id_created_at", "usuario_id", "created_at"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    usuario_id: Mapped[int] = mapped_column(ForeignKey("usuarios.id", ondelete="CASCADE"))
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("usuarios.id", ondelete="SET NULL"))
+    cambios: Mapped[dict] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

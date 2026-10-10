@@ -10,10 +10,17 @@ from datetime import date, datetime, time
 from typing import Optional
 
 from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, Time, text
+from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.core.enums import SedeEnum, enum_values
 from app.database import Base
+
+# `sede_enum` es compartido (usuarios, unidades_fisicas): lo crean las migraciones.
+SEDE_ENUM_ESPACIO = PGEnum(
+    SedeEnum, values_callable=enum_values, name="sede_enum", create_type=False
+)
 
 
 class Espacio(Base):
@@ -23,7 +30,7 @@ class Espacio(Base):
 
     id_espacio: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     nombre: Mapped[str] = mapped_column(String(100), nullable=False)
-    id_sede: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    sede: Mapped[SedeEnum] = mapped_column(SEDE_ENUM_ESPACIO, nullable=False, index=True)
     tipo: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
 
@@ -68,7 +75,9 @@ class ReservaEspacio(Base):
     )
 
     id_reserva: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    id_usuario: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    id_usuario: Mapped[int] = mapped_column(
+        ForeignKey("usuarios.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     id_espacio: Mapped[int] = mapped_column(
         ForeignKey("espacios.id_espacio", ondelete="CASCADE"), nullable=False, index=True
     )
