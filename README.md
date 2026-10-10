@@ -209,20 +209,6 @@ Backend-PrestaMeDios/
 
 ---
 
-## Flujo de trabajo
-
-El equipo aplica **Spec-Driven Development** dentro de Scrum (ClickUp):
-
-1. Toda funcionalidad parte de un spec aprobado (requisitos → contratos → criterios de aceptación).
-2. Ramas desde `develop`: `feat/<tema>`, `fix/<tema>`, `docs/<tema>`.
-3. Commits con [Conventional Commits](https://www.conventionalcommits.org/) en español: `feat(users): …`, `fix(spaces): …`.
-4. Pull Request a `develop` con al menos una revisión, tests en verde y referencia a los requisitos (`USR-05`, `GLO-03`…).
-5. `main` recibe sólo versiones estables para las entregas.
-
-**Convenciones de código:** dominio en español y términos técnicos en inglés; esquemas de entrada con `extra="forbid"`; errores de negocio con `AppError`; cambios de estado vía `PATCH /<recurso>/{id}/estado`; reglas operativas leídas con `obtener_parametro()` en lugar de constantes.
-
----
-
 ## Equipo
 
 Proyecto académico de la asignatura **Laboratorio de Software** (UNTDF, curso 2026).
