@@ -21,8 +21,15 @@ from app.core.security import (
     verify_dummy,
     verify_password,
 )
-from app.modules.users.models import Usuario, UsuarioHistorialEstado
-from app.modules.users.schemas import CambioEstadoRequest, RegistroRequest, UsuarioAdminCreate
+from app.modules.users.models import Usuario, UsuarioHistorialCambios, UsuarioHistorialEstado
+from app.modules.users.schemas import (
+    CambioEstadoRequest,
+    CambioPasswordRequest,
+    PerfilUpdate,
+    RegistroRequest,
+    UsuarioAdminCreate,
+    UsuarioAdminUpdate,
+)
 
 E = EstadoCuenta
 
@@ -338,6 +345,7 @@ async def crear_por_admin(db: AsyncSession, actor: Usuario, datos: UsuarioAdminC
         estado=E.ACTIVO,
         aprobado_por_id=actor.id,
         aprobado_en=ahora,
+        debe_cambiar_password=True,  # SPEC-02 A9: la contraseña la definió otra persona
     )
     db.add(usuario)
     await _persistir(db, commit=False)
@@ -411,5 +419,166 @@ async def cambiar_estado(
 
     _registrar_historial(db, objetivo, anterior, nuevo, motivo=req.motivo, actor_id=actor.id)
     await db.commit()
+    await db.refresh(objetivo)
+    return objetivo
+
+
+# ── SPEC-02 · Gestión de cuenta ──────────────────────────────────────────────
+
+_OCULTO = "***"
+
+
+def _password_actual_incorrecta() -> AppError:
+    return AppError(403, "PASSWORD_ACTUAL_INCORRECTA", "La contraseña actual no es correcta.")
+
+
+def _registrar_cambios(
+    db: AsyncSession, usuario: Usuario, cambios: dict, *, actor_id: int | None
+) -> None:
+    """RN-34: traza de la edición en la misma transacción (sin contraseñas)."""
+    if cambios:
+        db.add(UsuarioHistorialCambios(usuario_id=usuario.id, actor_id=actor_id, cambios=cambios))
+
+
+def _aplicar(usuario: Usuario, campo: str, valor: object, cambios: dict) -> None:
+    anterior = getattr(usuario, campo)
+    if anterior != valor:
+        cambios[campo] = [_serializable(anterior), _serializable(valor)]
+        setattr(usuario, campo, valor)
+
+
+def _serializable(valor: object) -> object:
+    return valor.value if hasattr(valor, "value") else valor
+
+
+async def _email_disponible(db: AsyncSession, email: str, usuario_id: int) -> None:
+    otro = await _buscar_por(db, email=email)
+    if otro is not None and otro.id != usuario_id:
+        raise _email_duplicado()
+
+
+async def actualizar_perfil(db: AsyncSession, usuario: Usuario, datos: PerfilUpdate) -> Usuario:
+    """UC-10 · Datos de contacto propios (USR-03; RN-32)."""
+    cambios: dict = {}
+    if "email" in datos.model_fields_set and datos.email != usuario.email:
+        valida = datos.password_actual is not None and verify_password(
+            datos.password_actual, usuario.password_hash
+        )[0]
+        if not valida:
+            raise _password_actual_incorrecta()
+        await _email_disponible(db, datos.email, usuario.id)  # type: ignore[arg-type]
+        _aplicar(usuario, "email", datos.email, cambios)
+    if "telefono" in datos.model_fields_set:
+        _aplicar(usuario, "telefono", datos.telefono, cambios)
+
+    _registrar_cambios(db, usuario, cambios, actor_id=usuario.id)
+    await _persistir(db, commit=True)
+    await db.refresh(usuario)
+    return usuario
+
+
+async def cambiar_password(
+    db: AsyncSession, usuario: Usuario, datos: CambioPasswordRequest
+) -> Sesion:
+    """UC-11 · Cambio de contraseña propia; cierra las demás sesiones (RN-32)."""
+    if not verify_password(datos.password_actual, usuario.password_hash)[0]:
+        raise _password_actual_incorrecta()
+    usuario.password_hash = hash_password(datos.password_nueva)
+    usuario.debe_cambiar_password = False
+    usuario.token_version += 1
+    _registrar_cambios(db, usuario, {"password": [_OCULTO, _OCULTO]}, actor_id=usuario.id)
+    await db.commit()
+    await db.refresh(usuario)
+    token, expires_in = crear_access_token(
+        usuario_id=usuario.id,
+        rol=usuario.rol,
+        sede=usuario.sede,
+        token_version=usuario.token_version,
+    )
+    return Sesion(usuario=usuario, access_token=token, expires_in=expires_in)
+
+
+async def editar_por_admin(
+    db: AsyncSession, actor: Usuario, usuario_id: int, datos: UsuarioAdminUpdate
+) -> Usuario:
+    """UC-12 · Edición administrativa con jurisdicción y auditoría (USR-04)."""
+    objetivo = await db.scalar(
+        select(Usuario)
+        .where(Usuario.id == usuario_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    try:
+        if objetivo is None or not _en_jurisdiccion(actor, objetivo):
+            raise usuario_no_encontrado()
+        campos = datos.model_fields_set
+        es_local = actor.rol == RolUsuario.ADMIN_LOCAL
+        if es_local and objetivo.rol not in ROLES_GESTIONABLES_POR_ADMIN_LOCAL:
+            raise permiso_insuficiente()
+        if actor.id == objetivo.id and campos & {"rol", "sede"}:
+            raise AppError(
+                403, "OPERACION_SOBRE_SI_MISMO", "No podés cambiar tu propio rol o sede."
+            )
+
+        nuevo_rol = datos.rol if "rol" in campos else objetivo.rol
+        nueva_sede = datos.sede if "sede" in campos else objetivo.sede
+        if es_local:
+            if nuevo_rol not in ROLES_GESTIONABLES_POR_ADMIN_LOCAL:
+                raise permiso_insuficiente()
+            if nueva_sede != objetivo.sede:
+                raise AppError(
+                    403, "SEDE_FUERA_DE_ALCANCE", "No tenés jurisdicción sobre la sede solicitada."
+                )
+        if (nuevo_rol == RolUsuario.SUPERADMIN) != (nueva_sede is None):
+            raise AppError(
+                422,
+                "ALCANCE_INCOHERENTE",
+                "Un SUPERADMIN no tiene sede (ambas sedes); el resto de los roles requiere una.",
+            )
+        if (
+            objetivo.rol == RolUsuario.SUPERADMIN
+            and nuevo_rol != RolUsuario.SUPERADMIN
+            and objetivo.estado == E.ACTIVO
+        ):
+            otros = await db.scalars(
+                select(Usuario.id)
+                .where(
+                    Usuario.rol == RolUsuario.SUPERADMIN,
+                    Usuario.estado == E.ACTIVO,
+                    Usuario.id != objetivo.id,
+                )
+                .with_for_update()
+            )
+            if not otros.first():
+                raise AppError(
+                    409, "ULTIMO_SUPERADMIN", "Debe existir al menos un Superadministrador activo."
+                )
+        if "email" in campos and datos.email != objetivo.email:
+            await _email_disponible(db, datos.email, objetivo.id)  # type: ignore[arg-type]
+        if "dni" in campos and datos.dni != objetivo.dni:
+            otro = await _buscar_por(db, dni=datos.dni)  # type: ignore[arg-type]
+            if otro is not None and otro.id != objetivo.id:
+                raise _dni_duplicado()
+    except AppError:
+        await db.rollback()
+        raise
+
+    cambios: dict = {}
+    for campo in ("nombre", "apellido", "dni", "telefono", "email"):
+        if campo in campos:
+            _aplicar(objetivo, campo, getattr(datos, campo), cambios)
+    _aplicar(objetivo, "rol", nuevo_rol, cambios)
+    _aplicar(objetivo, "sede", nueva_sede, cambios)
+    revoca = "rol" in cambios or "sede" in cambios
+    if datos.password_nueva is not None:
+        objetivo.password_hash = hash_password(datos.password_nueva)
+        objetivo.debe_cambiar_password = True
+        cambios["password"] = [_OCULTO, _OCULTO]
+        revoca = True
+    if revoca:
+        objetivo.token_version += 1  # RN-08
+
+    _registrar_cambios(db, objetivo, cambios, actor_id=actor.id)
+    await _persistir(db, commit=True)
     await db.refresh(objetivo)
     return objetivo

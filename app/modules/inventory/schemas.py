@@ -45,7 +45,11 @@ class UnidadFisicaBase(BaseModel):
 
 
 class UnidadFisicaCreate(UnidadFisicaBase):
+    """Alta de unidad. ``sede`` es automática para ``ADMIN_LOCAL`` (PRE-19, SPEC-02 §4)."""
+
     model_config = _INPUT_CONFIG
+
+    sede: SedeEnum | None = Field(default=None, examples=["Ushuaia"])  # type: ignore[assignment]
 
 
 class UnidadFisicaResponse(UnidadFisicaBase):
@@ -80,9 +84,14 @@ class EquipamientoBase(BaseModel):
 
 
 class EquipamientoCreate(EquipamientoBase):
-    """Alta de un ítem del catálogo, opcionalmente con sus unidades físicas."""
+    """Alta de un ítem con sus unidades físicas.
+
+    ``max_dias_prestamo`` omitido toma ``prestamo.general.max_dias`` (GLO-03).
+    """
 
     model_config = _INPUT_CONFIG
+
+    max_dias_prestamo: int | None = Field(default=None, ge=1, le=15)  # type: ignore[assignment]
 
     unidades: list[UnidadFisicaCreate] = Field(default_factory=list)
 
