@@ -5,9 +5,8 @@
 - ``*Response``: serializan modelos ORM vía ``from_attributes=True``.
 """
 
-from datetime import UTC, datetime, time, timedelta
-from typing import Annotated, Literal
-from zoneinfo import ZoneInfo
+from datetime import UTC, datetime
+from typing import Literal
 
 from pydantic import (
     AwareDatetime,
@@ -18,27 +17,15 @@ from pydantic import (
     model_validator,
 )
 
+from app.core.enums import SedeEnum
 from app.modules.loans.enums import EstadoDetalleEnum, EstadoOrdenEnum
 
 _INPUT_CONFIG = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-# Ambas sedes comparten huso horario.
-ZONA_SEDES = ZoneInfo("America/Argentina/Ushuaia")
-FRANJA_INICIO = time(9, 0)
-FRANJA_FIN = time(16, 0)
-MAX_DIAS_RANGO = 15  
-
-
 def _validar_rango(retiro: datetime, devolucion: datetime) -> None:
-    """Reglas de fechas que no dependen de otros dominios."""
-    for nombre, momento in (("retiro", retiro), ("devolución", devolucion)):
-        hora = momento.astimezone(ZONA_SEDES).time()
-        if not FRANJA_INICIO <= hora <= FRANJA_FIN:
-            raise ValueError(f"La hora de {nombre} debe estar entre 09:00 y 16:00")
+    """Única regla de fechas que no depende de parámetros globales."""
     if devolucion <= retiro:
         raise ValueError("La devolución debe ser posterior al retiro")
-    if devolucion - retiro > timedelta(days=MAX_DIAS_RANGO):
-        raise ValueError(f"El rango no puede superar {MAX_DIAS_RANGO} días")
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +88,7 @@ class OrdenPedidoResponse(BaseModel):
 
     id: int
     solicitante_id: int
-    sede: str  # TODO: unificar con SedeEnum de inventory cuando el equipo decida
+    sede: SedeEnum
     asignatura_id: int | None
     estado: EstadoOrdenEnum
     fecha_solicitud: AwareDatetime
@@ -119,13 +106,6 @@ class OrdenPedidoResponse(BaseModel):
             d.estado is EstadoDetalleEnum.ENTREGADO and d.devolucion_pactada < ahora
             for d in self.detalles
         )
-
-class OrdenPedidoCancelacion(BaseModel):
-    """Cancelar una orden pendiente (solicitante) o aprobada (administrador)."""
-
-    model_config = _INPUT_CONFIG
-
-    motivo: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +154,18 @@ class OrdenPedidoResolucion(BaseModel):
         if self.nuevo_retiro and self.nueva_devolucion:
             _validar_rango(self.nuevo_retiro, self.nueva_devolucion)
         return self
+
+
+class OrdenPedidoCancelacion(BaseModel):
+    """Cancelar una orden pendiente (solicitante) o aprobada (administrador).
+
+    El estado destino es siempre ``cancelada``. Que el motivo sea obligatorio
+    para el administrador lo valida el servicio (depende del rol).
+    """
+
+    model_config = _INPUT_CONFIG
+
+    motivo: str | None = Field(default=None, min_length=1, max_length=500)
 
 
 # ---------------------------------------------------------------------------
