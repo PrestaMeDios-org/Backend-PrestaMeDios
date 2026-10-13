@@ -9,8 +9,10 @@ from app.database import Base, DATABASE_URL
 
 # Importar todos los módulos de modelos para que sus tablas queden
 # registradas en Base.metadata antes del autogenerate.
+from app.modules.config import models as _config_models  # noqa: F401
 from app.modules.inventory import models as _inventory_models  # noqa: F401
 from app.modules.spaces import models as _spaces_models  # noqa: F401
+from app.modules.users import models as _users_models  # noqa: F401
 
 config = context.config
 config.set_main_option("sqlalchemy.url", DATABASE_URL)

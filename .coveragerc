@@ -1,0 +1,7 @@
+[run]
+concurrency = greenlet, thread
+source = app
+
+[report]
+exclude_also =
+    if __name__ == .__main__.:
