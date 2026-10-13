@@ -63,6 +63,7 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 # 1. Entorno virtual y dependencias
 python -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
+                                     # Si tira el error about_Execution_Policies en Windows usa el comando: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
 pip install -r requirements-dev.txt  # incluye requirements.txt + herramientas de test
 
 # 2. Configuración
@@ -73,9 +74,8 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"   # genera un JWT_S
 createdb prestamedios                # o desde psql: CREATE DATABASE prestamedios;
 alembic upgrade head                 # crea tablas, tipos, restricciones y parámetros semilla
 
-# 4. Superadministrador inicial (pide la contraseña por consola)
-python -m app.modules.users.cli crear-superadmin \
-  --email natalia.ader@untdf.edu.ar --nombre Natalia --apellido Ader --dni 30111222
+# 4. Superadministrador inicial (comando de una línea; pide la contraseña por consola)
+python -m app.modules.users.cli crear-superadmin --email natalia.ader@untdf.edu.ar --nombre Natalia --apellido Ader --dni 30111222
 
 # 5. Servidor de desarrollo
 uvicorn app.main:app --reload        # http://localhost:8000
