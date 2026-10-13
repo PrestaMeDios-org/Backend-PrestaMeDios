@@ -63,6 +63,7 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 # 1. Entorno virtual y dependencias
 python -m venv .venv
 source .venv/bin/activate            # Windows: .venv\Scripts\activate
+                                     # Si tira el error about_Execution_Policies en Windows usa el comando: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
 pip install -r requirements-dev.txt  # incluye requirements.txt + herramientas de test
 
 # 2. Configuración
@@ -73,9 +74,8 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"   # genera un JWT_S
 createdb prestamedios                # o desde psql: CREATE DATABASE prestamedios;
 alembic upgrade head                 # crea tablas, tipos, restricciones y parámetros semilla
 
-# 4. Superadministrador inicial (pide la contraseña por consola)
-python -m app.modules.users.cli crear-superadmin \
-  --email natalia.ader@untdf.edu.ar --nombre Natalia --apellido Ader --dni 30111222
+# 4. Superadministrador inicial (comando de una línea; pide la contraseña por consola)
+python -m app.modules.users.cli crear-superadmin --email natalia.ader@untdf.edu.ar --nombre Natalia --apellido Ader --dni 30111222
 
 # 5. Servidor de desarrollo
 uvicorn app.main:app --reload        # http://localhost:8000
@@ -206,20 +206,6 @@ Backend-PrestaMeDios/
 ├── requirements.txt            # dependencias de ejecución
 └── requirements-dev.txt        # + herramientas de test
 ```
-
----
-
-## Flujo de trabajo
-
-El equipo aplica **Spec-Driven Development** dentro de Scrum (ClickUp):
-
-1. Toda funcionalidad parte de un spec aprobado (requisitos → contratos → criterios de aceptación).
-2. Ramas desde `develop`: `feat/<tema>`, `fix/<tema>`, `docs/<tema>`.
-3. Commits con [Conventional Commits](https://www.conventionalcommits.org/) en español: `feat(users): …`, `fix(spaces): …`.
-4. Pull Request a `develop` con al menos una revisión, tests en verde y referencia a los requisitos (`USR-05`, `GLO-03`…).
-5. `main` recibe sólo versiones estables para las entregas.
-
-**Convenciones de código:** dominio en español y términos técnicos en inglés; esquemas de entrada con `extra="forbid"`; errores de negocio con `AppError`; cambios de estado vía `PATCH /<recurso>/{id}/estado`; reglas operativas leídas con `obtener_parametro()` en lugar de constantes.
 
 ---
 
