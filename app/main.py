@@ -12,6 +12,7 @@ from app.core.settings import get_settings
 from app.modules.config.router import router as config_router
 from app.modules.inventory.router import router as inventory_router
 from app.modules.spaces.router import router as spaces_router
+from app.modules.loans.router import router as loans_router
 from app.modules.users.router import auth_router, users_router
 
 # Falla al arrancar si falta configuración obligatoria (p. ej. JWT_SECRET_KEY).
@@ -65,6 +66,12 @@ app.include_router(
     spaces_router,
     prefix="/api/v1/spaces",
     tags=["Espacios e Infraestructura"],
+)
+
+app.include_router(
+    loans_router,
+    prefix="/api/v1/loans",
+    tags=["Préstamos y Solicitudes"],
 )
 
 

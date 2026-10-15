@@ -196,3 +196,69 @@ def auth(usuario: Usuario) -> dict[str, str]:
         token_version=datos["token_version"],
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+# ── SPEC-02 · Fábricas de espacios, reservas y parámetros ────────────────────
+
+
+def dia(offset: int):
+    """Fecha relativa a hoy en la zona del laboratorio."""
+    from datetime import timedelta
+
+    from app.core.settings import ahora_lab
+
+    return ahora_lab().date() + timedelta(days=offset)
+
+
+@pytest.fixture
+def crear_espacio(db: AsyncSession):
+    from app.modules.spaces.models import Espacio
+
+    async def _crear(sede: SedeEnum = SedeEnum.USHUAIA, nombre: str = "Isla de Edición 1"):
+        espacio = Espacio(nombre=nombre, tipo="Isla de Edición", sede=sede)
+        db.add(espacio)
+        await db.commit()
+        return espacio
+
+    return _crear
+
+
+@pytest.fixture
+def crear_reserva(db: AsyncSession):
+    from datetime import time
+
+    from app.modules.spaces.models import ReservaEspacio
+
+    async def _crear(
+        usuario: Usuario,
+        espacio,
+        *,
+        fecha=None,
+        inicio: time = time(10, 0),
+        fin: time = time(11, 0),
+        estado: str = "Pendiente",
+    ):
+        reserva = ReservaEspacio(
+            id_usuario=usuario._cache_auth["id"],  # type: ignore[attr-defined]
+            id_espacio=espacio.id_espacio,
+            fecha_reserva=fecha or dia(3),
+            hora_inicio=inicio,
+            hora_fin=fin,
+            estado_reserva=estado,
+        )
+        db.add(reserva)
+        await db.commit()
+        return reserva
+
+    return _crear
+
+
+@pytest.fixture
+def set_parametro(db: AsyncSession):
+    async def _set(clave: str, valor) -> None:
+        parametro = await db.get(ParametroGlobal, clave)
+        assert parametro is not None
+        parametro.valor = valor
+        await db.commit()
+
+    return _set

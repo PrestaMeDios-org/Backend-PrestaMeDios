@@ -1,55 +1,69 @@
-"""Reglas compartidas para calcular intervalos de ocupación de espacios."""
+"""Reglas puras para calcular intervalos de ocupación de espacios.
+
+El horario operativo se recibe por parámetro (``apertura``/``cierre``) porque
+proviene del Panel de Parámetros Globales (GLO-02, GLO-03). Los rangos son
+semiabiertos ``[inicio, fin)``: dos franjas contiguas no se solapan (EC-24).
+"""
 
 from datetime import date, time
 from typing import Iterable
 
-from app.modules.spaces.models import BloqueoEspacio, ReservaEspacio
+from app.modules.spaces.models import BloqueoEspacio
 
-HORA_APERTURA = time(9, 0)
-HORA_CIERRE = time(16, 0)
+Intervalo = tuple[time, time]
 
 
-def intervalos_libres(ocupados: Iterable[tuple[time, time]]) -> list[tuple[time, time]]:
-    """Resta los intervalos ocupados del horario operativo [09:00, 16:00)."""
+def solapan(a_inicio: time, a_fin: time, b_inicio: time, b_fin: time) -> bool:
+    return a_inicio < b_fin and a_fin > b_inicio
+
+
+def intervalos_libres(
+    ocupados: Iterable[Intervalo], apertura: time, cierre: time
+) -> list[Intervalo]:
+    """Resta los intervalos ocupados del horario operativo ``[apertura, cierre)``."""
     recortados = sorted(
-        (max(inicio, HORA_APERTURA), min(fin, HORA_CIERRE))
+        (max(inicio, apertura), min(fin, cierre))
         for inicio, fin in ocupados
-        if inicio < HORA_CIERRE and fin > HORA_APERTURA
+        if inicio < cierre and fin > apertura
     )
-    unidos: list[tuple[time, time]] = []
+    unidos: list[Intervalo] = []
     for inicio, fin in recortados:
         if unidos and inicio <= unidos[-1][1]:
             unidos[-1] = (unidos[-1][0], max(unidos[-1][1], fin))
         else:
             unidos.append((inicio, fin))
 
-    libres: list[tuple[time, time]] = []
-    cursor = HORA_APERTURA
+    libres: list[Intervalo] = []
+    cursor = apertura
     for inicio, fin in unidos:
         if cursor < inicio:
             libres.append((cursor, inicio))
         cursor = max(cursor, fin)
-    if cursor < HORA_CIERRE:
-        libres.append((cursor, HORA_CIERRE))
+    if cursor < cierre:
+        libres.append((cursor, cierre))
     return libres
 
 
-def bloqueo_intervalo_en_fecha(bloqueo: BloqueoEspacio, fecha: date) -> tuple[time, time] | None:
-    """Devuelve el intervalo bloqueado en una fecha incluida en el rango."""
+def bloqueo_intervalo_en_fecha(
+    bloqueo: BloqueoEspacio, fecha: date, apertura: time, cierre: time
+) -> Intervalo | None:
+    """Intervalo bloqueado en ``fecha`` (día completo = todo el horario operativo)."""
     if not bloqueo.fecha_inicio <= fecha <= bloqueo.fecha_fin:
         return None
-    if bloqueo.hora_inicio is None and bloqueo.hora_fin is None:
-        return HORA_APERTURA, HORA_CIERRE
     if bloqueo.hora_inicio is None or bloqueo.hora_fin is None:
-        raise ValueError(f"El bloqueo {bloqueo.id_bloqueo} tiene un rango horario incompleto.")
+        return apertura, cierre
     return bloqueo.hora_inicio, bloqueo.hora_fin
 
 
-def bloqueo_solapa_reserva(bloqueo: BloqueoEspacio, reserva: ReservaEspacio) -> bool:
-    """Evalúa la intersección entre un bloqueo y una reserva en una fecha."""
-    bloqueado = bloqueo_intervalo_en_fecha(bloqueo, reserva.fecha_reserva)
-    return bool(
-        bloqueado
-        and reserva.hora_inicio < bloqueado[1]
-        and reserva.hora_fin > bloqueado[0]
-    )
+def bloqueo_solapa(
+    bloqueo: BloqueoEspacio, fecha: date, inicio: time, fin: time
+) -> bool:
+    """¿El bloqueo intersecta la franja ``[inicio, fin)`` de ``fecha``?
+
+    Un bloqueo de día completo cubre el día entero, aun fuera del horario.
+    """
+    if not bloqueo.fecha_inicio <= fecha <= bloqueo.fecha_fin:
+        return False
+    if bloqueo.hora_inicio is None or bloqueo.hora_fin is None:
+        return True
+    return solapan(inicio, fin, bloqueo.hora_inicio, bloqueo.hora_fin)
