@@ -147,9 +147,12 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | | `PUT /api/v1/config/parametros/{clave}` | Modificar (Superadministrador, con control de versión) |
 | | `GET /api/v1/config/parametros/{clave}/historial` | Historial de cambios |
 | Inventario | `GET/POST /api/v1/inventory/categorias` | Categorías del catálogo |
-| | `GET/POST /api/v1/inventory/equipamiento` | Catálogo de equipamiento |
-| | `POST /api/v1/inventory/equipamiento/{id}/unidades` | Alta de unidades físicas |
-| | `GET /api/v1/inventory/unidades` · `PATCH …/{id}/estado` | Stock y estado (mantenimiento) |
+| | `GET /api/v1/inventory/equipamiento[/{id}]` | Catálogo con filtros `sede`, `categoria`, `q`. Estudiantes y docentes reciben una vista reducida (sin unidades ni series); `incluir_inactivos` sólo para administradores |
+| | `POST /api/v1/inventory/equipamiento` | Alta de equipamiento (plazo por defecto desde `prestamo.general.max_dias`, o `prestamo.notebook.max_dias` si `es_notebook`) |
+| | `PATCH /api/v1/inventory/equipamiento/{id}` · `PATCH …/{id}/estado` | Edición y baja o reactivación lógica |
+| | `POST /api/v1/inventory/equipamiento/{id}/unidades` | Alta de unidades físicas (sede automática para `ADMIN_LOCAL`) |
+| | `GET /api/v1/inventory/unidades` · `PATCH …/{id}` | Stock de la jurisdicción; edición de serie, código y locker (1–7) |
+| | `PATCH /api/v1/inventory/unidades/{id}/estado` | `disponible` ⇄ `mantenimiento`, y `baja` (definitiva). `prestado` lo gestiona sólo `loans` mediante `app/modules/inventory/service.py` |
 | Espacios | `GET/POST /api/v1/spaces/espacios` | Espacios reservables |
 | | `GET/POST /api/v1/spaces/reservas` · `PATCH …/{id}/estado` | Solicitudes y su ciclo de vida |
 | | `GET/POST /api/v1/spaces/bloqueos` | Bloqueos administrativos |
