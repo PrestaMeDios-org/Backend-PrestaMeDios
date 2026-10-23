@@ -44,9 +44,10 @@ async def catalogo(db):
     ("metodo", "ruta"),
     [("get", "/categorias"), ("post", "/categorias"), ("get", "/equipamiento"),
      ("get", "/equipamiento/1"), ("post", "/equipamiento"), ("post", "/equipamiento/1/unidades"),
-     ("get", "/unidades"), ("patch", "/unidades/1/estado")],
+     ("get", "/unidades"), ("patch", "/unidades/1/estado"), ("patch", "/unidades/1"),
+     ("patch", "/equipamiento/1"), ("patch", "/equipamiento/1/estado")],
 )
-async def test_exige_sesion(client, db, metodo, ruta):  # AC-40
+async def test_exige_sesion(client, db, metodo, ruta):  # AC-40, INV-01
     r = await getattr(client, metodo)(f"{B}{ruta}", **({"json": {}} if metodo != "get" else {}))
     assert r.status_code == 401
 
@@ -56,7 +57,7 @@ class TestAlcanceDeLectura:  # AC-41
         est = await crear_usuario(R.ESTUDIANTE, USH)
         items = (await client.get(f"{B}/equipamiento", headers=auth(est))).json()
         assert [i["nombre"] for i in items] == ["Cámara"]
-        assert [u["sede"] for u in items[0]["unidades"]] == ["Ushuaia"]
+        assert "unidades" not in items[0]  # INV-05 (SPEC-04 D-04): vista reducida
         assert items[0]["cantidad_total"] == 1
 
     async def test_admin_ve_items_sin_unidades(self, client, catalogo, crear_usuario):
@@ -84,7 +85,8 @@ class TestAlcanceDeLectura:  # AC-41
         r = await client.get(f"{B}/equipamiento/{catalogo['tripode']}", headers=auth(est))
         assert r.status_code == 404 and r.json()["code"] == "EQUIPAMIENTO_NO_ENCONTRADO"
         r = await client.get(f"{B}/equipamiento/{catalogo['camara']}", headers=auth(est))
-        assert r.status_code == 200 and len(r.json()["unidades"]) == 1
+        assert r.status_code == 200 and "unidades" not in r.json()  # INV-05 (D-04)
+        assert r.json()["cantidad_total"] == 1
 
     async def test_stock_de_admin_local(self, client, catalogo, crear_usuario):
         admin = await crear_usuario(R.ADMIN_LOCAL, RG)
