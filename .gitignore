@@ -6,3 +6,6 @@ __pycache__/
 .env
 .pytest_cache/
 .coverage
+htmlcov/
+*.err
+*.log
