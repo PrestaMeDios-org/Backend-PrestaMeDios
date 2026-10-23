@@ -225,7 +225,7 @@ Debido a que las operaciones del laboratorio requieren la intervención directa 
 * **PRE-09 - Solicitudes de docentes:** El sistema habilitará a los docentes a generar solicitudes de equipamiento para uso de cátedra. Estas peticiones ingresarán directamente a la bandeja del Administrador para su validación.
 * **PRE-10 - Aprobación o Rechazo de Solicitudes de Préstamos de Ítems:** El Administrador confirma la aprobación o rechazo de la solicitud de Ítems. La confirmación de las reservas no son automáticas, se confirman manualmente por el Administrador.
 
-**Módulo 3: Operaciones de Panel y Control de Stock**
+**Módulo 3: Operaciones de Pañol y Control de Stock**
 
 * **PRE-11 - Renovación de computadoras:** La extensión de préstamos de notebooks se realizará exclusivamente de manera presencial. El administrador contará con un botón en su panel operativo para extender la fecha de devolución.
 * **PRE-12 - Gestión de inventario (stock):** El Administrador contará con una vista tipo tabla interactiva filtrable por Sede. Las columnas incluirán flechas de ordenamiento (ascendente/descendente) y mostrarán: Nombre, Categoría, Locker (1-7), Tipo (Especial/Común) y unidades disponibles. Permitirá desplegar los ítems para visualizar las unidades físicas individuales (ej. CAM-S-01) y su historial de usuarios.
