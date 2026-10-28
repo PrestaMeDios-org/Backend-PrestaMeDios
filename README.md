@@ -4,7 +4,7 @@ API REST del sistema de préstamos de equipamiento y reservas de espacios del **
 
 | | |
 | --- | --- |
-| **Requisitos (ERS IEEE 830)** | [`docs/ERS.md`](docs/ERS.md) |
+| **Requisitos (ERS IEEE 830)** | [`docs/ERS.md` en el repositorio de documentación](https://github.com/PrestaMeDios-org/Docs-PrestaMeDios/blob/main/docs/ERS.md) |
 | **Documentación interactiva** | `http://localhost:8000/docs` (Swagger) · `/redoc` |
 | **Frontend** | [`Frontend-PrestaMeDios`](https://github.com/PrestaMeDios-org/Frontend-PrestaMeDios) |
 | **Stack** | Python 3.11+ · FastAPI · Pydantic v2 · SQLAlchemy 2.0 async · PostgreSQL 15+ · Alembic |
@@ -201,7 +201,6 @@ Backend-PrestaMeDios/
 │       └── <dominio>/          # models · schemas · service · router · enums
 ├── alembic/versions/           # migraciones 000N_<desc>.py
 ├── tests/                      # conftest.py + tests por módulo
-├── docs/ERS.md                 # especificación de requisitos (documento académico)
 ├── .env.example
 ├── requirements.txt            # dependencias de ejecución
 └── requirements-dev.txt        # + herramientas de test
