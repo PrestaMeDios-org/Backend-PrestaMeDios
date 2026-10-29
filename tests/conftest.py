@@ -37,6 +37,7 @@ from app.modules.config import models as _config_models  # noqa: E402, F401
 from app.modules.config.models import ParametroGlobal  # noqa: E402
 from app.modules.config.seed import PARAMETROS_SEMILLA  # noqa: E402
 from app.modules.inventory import models as _inventory_models  # noqa: E402, F401
+from app.modules.loans import models as _loans_models  # noqa: E402, F401
 from app.modules.spaces import models as _spaces_models  # noqa: E402, F401
 from app.modules.users.models import Usuario  # noqa: E402
 
@@ -45,8 +46,8 @@ PASSWORD = "Camara2026!"
 
 _TABLAS = (
     "parametros_globales_historial, parametros_globales, usuarios_historial_estado, "
-    "reservas_espacios, bloqueos_espacios, espacios, unidades_fisicas, equipamientos, "
-    "categorias, usuarios"
+    "reservas_espacios, bloqueos_espacios, espacios, detalles_prestamo, ordenes_pedido, "
+    "unidades_fisicas, equipamientos, categorias, usuarios"
 )
 
 

@@ -1,6 +1,6 @@
 """Contratos API (API-First) del módulo `loans` (Pydantic v2).
 
-- ``*Create`` / ``*Resolucion``: payloads de entrada, estrictos
+- ``*Create`` / ``*EstadoUpdate``: payloads de entrada, estrictos
   (``extra="forbid"``, trim).
 - ``*Response``: serializan modelos ORM vía ``from_attributes=True``.
 """
@@ -21,6 +21,7 @@ from app.core.enums import SedeEnum
 from app.modules.loans.enums import EstadoDetalleEnum, EstadoOrdenEnum
 
 _INPUT_CONFIG = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
 
 def _validar_rango(retiro: datetime, devolucion: datetime) -> None:
     """Única regla de fechas que no depende de parámetros globales."""
@@ -120,69 +121,41 @@ class AsignacionUnidad(BaseModel):
     unidad_fisica_id: int = Field(ge=1)
 
 
-class OrdenPedidoResolucion(BaseModel):
-    """Aprobar o rechazar una orden pendiente.
+class OrdenPedidoEstadoUpdate(BaseModel):
+    """Cambio de estado de una orden: aprobar, rechazar o cancelar (PRE-10, PRE-18).
 
-    - ``aprobada``: requiere una asignación de unidad por cada línea.
-    - ``rechazada``: requiere ``motivo_resolucion`` y no admite asignaciones.
-    - El administrador puede ajustar los horarios (congestión de entrega).
+    Solo valida la forma del payload. Lo que depende del rol, de la sede o del
+    estado actual (quién puede cancelar, si el motivo es obligatorio, si la
+    transición es válida) lo resuelve el servicio con ``AppError``.
     """
 
     model_config = _INPUT_CONFIG
 
-    estado: Literal[EstadoOrdenEnum.APROBADA, EstadoOrdenEnum.RECHAZADA]
-    motivo_resolucion: str | None = Field(default=None, min_length=1, max_length=500)
+    estado: Literal[
+        EstadoOrdenEnum.APROBADA,
+        EstadoOrdenEnum.RECHAZADA,
+        EstadoOrdenEnum.CANCELADA,
+    ]
+    motivo: str | None = Field(default=None, min_length=1, max_length=500)
     asignaciones: list[AsignacionUnidad] = Field(default_factory=list)
     nuevo_retiro: AwareDatetime | None = None
     nueva_devolucion: AwareDatetime | None = None
 
     @model_validator(mode="after")
-    def _validar_resolucion(self) -> "OrdenPedidoResolucion":
-        if self.estado is EstadoOrdenEnum.RECHAZADA:
-            if not self.motivo_resolucion:
-                raise ValueError("Rechazar requiere motivo_resolucion")
-            if self.asignaciones:
-                raise ValueError("Una orden rechazada no lleva asignaciones")
-        else:
+    def _validar_segun_estado(self) -> "OrdenPedidoEstadoUpdate":
+        if self.estado is EstadoOrdenEnum.APROBADA:
             if not self.asignaciones:
                 raise ValueError("Aprobar requiere asignar una unidad por línea")
             ids = [a.detalle_id for a in self.asignaciones]
             if len(ids) != len(set(ids)):
                 raise ValueError("Hay líneas con más de una asignación")
-        if (self.nuevo_retiro is None) != (self.nueva_devolucion is None):
-            raise ValueError("Para ajustar horarios enviá retiro y devolución juntos")
-        if self.nuevo_retiro and self.nueva_devolucion:
-            _validar_rango(self.nuevo_retiro, self.nueva_devolucion)
+            if (self.nuevo_retiro is None) != (self.nueva_devolucion is None):
+                raise ValueError("Para ajustar horarios enviá retiro y devolución juntos")
+            if self.nuevo_retiro and self.nueva_devolucion:
+                _validar_rango(self.nuevo_retiro, self.nueva_devolucion)
+        else:
+            if self.asignaciones:
+                raise ValueError("Solo la aprobación admite asignaciones")
+            if self.nuevo_retiro or self.nueva_devolucion:
+                raise ValueError("Solo la aprobación admite ajuste horario")
         return self
-
-
-class OrdenPedidoCancelacion(BaseModel):
-    """Cancelar una orden pendiente (solicitante) o aprobada (administrador).
-
-    El estado destino es siempre ``cancelada``. Que el motivo sea obligatorio
-    para el administrador lo valida el servicio (depende del rol).
-    """
-
-    model_config = _INPUT_CONFIG
-
-    motivo: str | None = Field(default=None, min_length=1, max_length=500)
-
-
-# ---------------------------------------------------------------------------
-# Errores del contrato (documentan 409 y 422 en OpenAPI)
-# ---------------------------------------------------------------------------
-class ErrorConflictoReserva(BaseModel):
-    """409: la base rechazó el solapamiento de una unidad."""
-
-    codigo: str = "UNIDAD_NO_DISPONIBLE"
-    detalle: str
-    unidad_fisica_id: int | None = None
-
-
-class ErrorLimiteDias(BaseModel):
-    """422: el rango supera el máximo del ítem."""
-
-    codigo: str = "LIMITE_DIAS_EXCEDIDO"
-    detalle: str
-    equipamiento_id: int
-    max_dias: int
