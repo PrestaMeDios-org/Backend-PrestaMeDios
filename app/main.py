@@ -23,7 +23,7 @@ app = FastAPI(
     description=(
         "API del Laboratorio de Medios Audiovisuales (ICSE — UNTDF): identidad y permisos, "
         "catálogo e inventario, préstamos y solicitudes de equipamiento,"
-        " reservas de espacios y configuración global."
+        "reservas de espacios y configuración global."
     ),
     version="0.2.0",
 )
