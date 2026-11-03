@@ -39,7 +39,7 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 | `config` | `/api/v1/config` | GLO-03 | Implementado |
 | `inventory` | `/api/v1/inventory` | PRE-01, PRE-02, PRE-12, PRE-14, PRE-19 | Implementado |
 | `spaces` | `/api/v1/spaces` | RES-01…RES-05, GLO-02, GLO-04 | Implementado |
-| `loans` | — | PRE-03…PRE-20 | Pendiente |
+| `loans` | `/api/v1/loans` | PRE-03…PRE-11, PRE-13, PRE-15…PRE-18, PRE-20 | Sólo contratos: los endpoints exigen sesión y responden `501 NO_IMPLEMENTADO` |
 | `notifications` | — | NOV-01…NOV-04 | Pendiente |
 | `assistant` | — | IA-01…IA-03 | Pendiente |
 
