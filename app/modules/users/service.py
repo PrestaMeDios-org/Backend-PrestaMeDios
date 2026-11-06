@@ -4,11 +4,13 @@ Los servicios no conocen HTTP salvo ``AppError``; los routers sólo validan
 contrato y permisos y delegan aquí.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Integer, Select, any_, bindparam, func, or_, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -582,3 +584,50 @@ async def editar_por_admin(
     await _persistir(db, commit=True)
     await db.refresh(objetivo)
     return objetivo
+
+
+# ── API pública para otros módulos (SPEC-03 §4, P3.3) ────────────────────────
+#
+# Lo que está debajo de esta línea es contrato: `spaces` y `loans` lo importan.
+# El resto de este archivo es interno de `users`.
+
+
+@dataclass(frozen=True, slots=True)
+class DatosPublicosUsuario:
+    """Identidad mínima mostrable de un usuario (P6). Nunca incluye DNI, email ni teléfono."""
+
+    id: int
+    nombre: str
+    apellido: str
+
+
+async def datos_publicos_por_ids(
+    db: AsyncSession, ids: Iterable[int]
+) -> dict[int, DatosPublicosUsuario]:
+    """Nombre y apellido por lote de ids (C2 de SPEC-05; bandeja de reservas del Perfil 4).
+
+    Función pública (P3.3, enmienda 1.1.1). No filtra por sede ni por estado (RN-38,
+    RN-39): la autorización es de quien llama, que sólo pasa ids de registros que ya
+    puede mostrar (P5, P6). **Nunca** se usa para mostrar identidades en la
+    disponibilidad de espacios o equipamiento, ni para mostrarle a un estudiante datos
+    de otro solicitante (RN-43).
+
+    - Los ids repetidos se consultan una sola vez (RN-35); una entrada vacía devuelve
+      ``{}`` sin consultar la base (RN-36); los inexistentes se omiten (RN-37).
+    - Selecciona sólo ``id``, ``nombre`` y ``apellido``, no la entidad ``Usuario``: no
+      carga DNI, email ni teléfono en la sesión del llamador (RN-40).
+    - Una sola consulta con los ids en un único parámetro arreglo (RN-41).
+    - No hace ``commit``, ``rollback`` ni ``flush``: la transacción es de quien llama (RN-42).
+    """
+    unicos = list(set(ids))
+    if not unicos:
+        return {}
+    filas = await db.execute(
+        select(Usuario.id, Usuario.nombre, Usuario.apellido).where(
+            Usuario.id == any_(bindparam("ids", unicos, type_=ARRAY(Integer)))
+        )
+    )
+    return {
+        fila.id: DatosPublicosUsuario(id=fila.id, nombre=fila.nombre, apellido=fila.apellido)
+        for fila in filas
+    }
