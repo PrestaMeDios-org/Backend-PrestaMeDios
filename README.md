@@ -39,13 +39,15 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 | `config` | `/api/v1/config` | GLO-03 | Implementado |
 | `inventory` | `/api/v1/inventory` | PRE-01, PRE-02, PRE-12, PRE-14, PRE-19 | Implementado |
 | `spaces` | `/api/v1/spaces` | RES-01…RES-05, GLO-02, GLO-04 | Implementado |
-| `loans` | — | PRE-03…PRE-20 | Pendiente |
+| `loans` | `/api/v1/loans` | PRE-03…PRE-11, PRE-13, PRE-15…PRE-18, PRE-20 | Sólo contratos: los endpoints exigen sesión y responden `501 NO_IMPLEMENTADO` |
 | `notifications` | — | NOV-01…NOV-04 | Pendiente |
 | `assistant` | — | IA-01…IA-03 | Pendiente |
 
 **Roles:** `SUPERADMIN` (ambas sedes) · `ADMIN_LOCAL` (una sede) · `DOCENTE` · `ESTUDIANTE`. Los usuarios sólo operan sobre los recursos de su sede, excepto el Superadministrador.
 
 **Seguridad transversal.** Todos los endpoints, salvo registro, login y `/health`, requieren sesión. El solicitante de una reserva es siempre el usuario autenticado; los recursos creados por un administrador local reciben su sede automáticamente; un recurso de otra sede se responde como inexistente (`404`). Las cuentas creadas o restablecidas por un administrador deben cambiar la contraseña antes de operar (`403 CAMBIO_PASSWORD_REQUERIDO`).
+
+**API pública de `users` para otros módulos.** `app.modules.users.service.datos_publicos_por_ids(db, ids)` devuelve `{id: DatosPublicosUsuario(id, nombre, apellido)}` en una sola consulta, para mostrar al solicitante en `spaces` y `loans` sin importar el modelo `Usuario` (SPEC-03 Fase A). No filtra por sede ni por estado: quien la llama sólo pasa ids que ya puede mostrar, y nunca la usa para exponer identidades en la disponibilidad.
 
 ---
 
