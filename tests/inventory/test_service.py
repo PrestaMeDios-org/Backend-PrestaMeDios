@@ -11,6 +11,7 @@ from app.modules.inventory.enums import EstadoUnidadEnum as E
 from app.modules.inventory.models import UnidadFisica
 from app.modules.inventory.service import (
     liberar_unidad,
+    marcar_unidad_mantenimiento,
     marcar_unidad_prestada,
     unidad_es_asignable,
     unidades_asignables,
@@ -98,3 +99,17 @@ async def test_dos_entregas_simultaneas_de_la_misma_unidad(
 
     resultados = await asyncio.gather(entregar(), entregar())
     assert sorted(resultados) == ["TRANSICION_ESTADO_INVALIDA", "ok"]
+
+
+async def test_mantenimiento_desde_disponible(db, crear_equipo):  # INV-18 (servicio)
+    eq = await crear_equipo("CAM", unidades=((USH,),))
+    uid = (await _ids(db, eq))["CAM-U1"]
+    unidad = await marcar_unidad_mantenimiento(db, uid)
+    await db.commit()
+    assert unidad.estado is E.MANTENIMIENTO
+    # idempotente: una segunda llamada no lanza y deja la unidad en mantenimiento
+    unidad2 = await marcar_unidad_mantenimiento(db, uid)
+    assert unidad2.estado is E.MANTENIMIENTO
+    with pytest.raises(AppError) as exc:
+        await marcar_unidad_mantenimiento(db, 9999)
+    assert exc.value.status_code == 404 and exc.value.code == "UNIDAD_NO_ENCONTRADA"

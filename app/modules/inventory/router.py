@@ -8,6 +8,7 @@
   automática para ``ADMIN_LOCAL`` (PRE-19, RN-31).
 """
 
+from datetime import date
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -28,9 +29,17 @@ from app.database import get_db
 from app.modules.config.service import obtener_parametro
 from app.modules.inventory.enums import EstadoUnidadEnum, SedeEnum
 from app.modules.inventory.models import Categoria, Equipamiento, UnidadFisica
+from app.core.settings import ahora_lab
+from app.modules.inventory.disponibilidad import (
+    MAX_DIAS_DISPONIBILIDAD,
+    disponibilidad_por_dia,
+    validar_rango,
+)
 from app.modules.inventory.schemas import (
     CategoriaCreate,
     CategoriaResponse,
+    DiaDisponibilidad,
+    DisponibilidadResponse,
     EquipamientoCreate,
     EquipamientoEstadoUpdate,
     EquipamientoPublicoResponse,
@@ -55,6 +64,11 @@ _solo_admins = require_roles(RolUsuario.ADMIN_LOCAL, RolUsuario.SUPERADMIN)
 
 def _equipamiento_no_encontrado() -> AppError:
     return AppError(404, "EQUIPAMIENTO_NO_ENCONTRADO", "Equipamiento no encontrado.")
+
+
+async def _plazo_por_defecto(db: AsyncSession, es_notebook: bool) -> int:
+    clave = "prestamo.notebook.max_dias" if es_notebook else "prestamo.general.max_dias"
+    return int(await obtener_parametro(db, clave))
 
 
 async def _commit_or_409(db: AsyncSession, code: str, detail: str) -> None:
@@ -214,6 +228,40 @@ async def obtener_equipamiento(
     return _serializar(actor, equipamiento)
 
 
+@router.get(
+    "/equipamiento/{equipamiento_id}/disponibilidad",
+    response_model=DisponibilidadResponse,
+    summary="Disponibilidad por día de un ítem (mini-calendario)",
+    responses=error_responses(401, 403, 404, 422),
+)
+async def obtener_disponibilidad(
+    equipamiento_id: int,
+    desde: date = Query(..., examples=["2026-11-09"]),
+    hasta: date = Query(..., examples=["2026-11-30"]),
+    sede: SedeEnum | None = Query(default=None),
+    actor: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DisponibilidadResponse:
+    # Unidades libres por dia, sin identidad de solicitantes (PRE-01, RN-I14, RN-I15).
+    sede_calculo = sede_para_alta(actor, sede)
+    validar_rango(desde, hasta, ahora_lab().date())
+    stmt = _stmt_equipamiento_en_alcance(actor, sede_calculo, incluir_inactivos=True).where(
+        Equipamiento.id == equipamiento_id
+    )
+    equipamiento = await db.scalar(stmt)
+    if equipamiento is None or (not equipamiento.activo and actor.rol not in ROLES_ADMIN):
+        raise _equipamiento_no_encontrado()
+    asignables, dias = await disponibilidad_por_dia(db, equipamiento_id, sede_calculo, desde, hasta)
+    return DisponibilidadResponse(
+        equipamiento_id=equipamiento_id,
+        sede=sede_calculo,
+        desde=desde,
+        hasta=hasta,
+        unidades_asignables=asignables,
+        dias=[DiaDisponibilidad(fecha=f, unidades_libres=n, disponible=n > 0) for f, n in dias],
+    )
+
+
 @router.post(
     "/equipamiento",
     response_model=EquipamientoResponse,
@@ -231,8 +279,7 @@ async def crear_equipamiento(
     datos = payload.model_dump(exclude={"unidades", "max_dias_prestamo"})
     max_dias = payload.max_dias_prestamo
     if max_dias is None:
-        clave = "prestamo.notebook.max_dias" if payload.es_notebook else "prestamo.general.max_dias"
-        max_dias = int(await obtener_parametro(db, clave))
+        max_dias = await _plazo_por_defecto(db, payload.es_notebook)
 
     equipamiento = Equipamiento(**datos, max_dias_prestamo=max_dias)
     equipamiento.unidades = [_unidad(u, actor) for u in payload.unidades]
@@ -270,6 +317,12 @@ async def editar_equipamiento(
     cambios = payload.model_dump(exclude_unset=True)
     if "categoria_id" in cambios:
         await _exigir_categoria(db, cambios["categoria_id"])
+    if (
+        "es_notebook" in cambios
+        and cambios["es_notebook"] != equipamiento.es_notebook
+        and "max_dias_prestamo" not in cambios
+    ):
+        cambios["max_dias_prestamo"] = await _plazo_por_defecto(db, cambios["es_notebook"])
     for campo, valor in cambios.items():
         setattr(equipamiento, campo, valor)
     await _commit_inventario(db)
