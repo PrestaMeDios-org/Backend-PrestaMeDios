@@ -37,3 +37,22 @@ ESTADOS_DETALLE_QUE_OCUPAN = (
     EstadoDetalleEnum.RESERVADO,
     EstadoDetalleEnum.ENTREGADO,
 )
+
+
+class SituacionOrdenEnum(StrEnum):
+    """Situación derivada de la orden (RN-L31, D-L19). No se guarda.
+
+    Separa, dentro de un mismo estado (por ejemplo ``aprobada``), las órdenes
+    que siguen en curso de las que ya terminaron.
+    """
+
+    EN_CURSO = "en_curso"
+    FINALIZADA = "finalizada"
+
+
+# Una orden sigue en curso mientras alguna línea esté en uno de estos estados.
+ESTADOS_DETALLE_EN_CURSO = (
+    EstadoDetalleEnum.PENDIENTE,
+    EstadoDetalleEnum.RESERVADO,
+    EstadoDetalleEnum.ENTREGADO,
+)

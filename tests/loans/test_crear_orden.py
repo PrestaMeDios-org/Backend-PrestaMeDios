@@ -74,6 +74,8 @@ async def test_crea_la_orden_pendiente_con_sus_lineas(client, db, crear_usuario,
     assert orden["sede"] == SedeEnum.RIO_GRANDE.value
     assert orden["asignatura_id"] == 7
     assert orden["es_renovado"] is False
+    assert orden["situacion"] == "en_curso"  # AC-L61
+    assert orden["resuelto_en"] is None
     assert len(orden["detalles"]) == 2
     for linea in orden["detalles"]:
         assert linea["equipamiento_id"] == camara.id

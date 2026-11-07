@@ -33,7 +33,12 @@ from pydantic import (
 )
 
 from app.core.enums import SedeEnum
-from app.modules.loans.enums import EstadoDetalleEnum, EstadoOrdenEnum
+from app.modules.loans.enums import (
+    ESTADOS_DETALLE_EN_CURSO,
+    EstadoDetalleEnum,
+    EstadoOrdenEnum,
+    SituacionOrdenEnum,
+)
 
 _INPUT_CONFIG = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -132,6 +137,16 @@ class OrdenPedidoCreate(BaseModel):
         return self
 
 
+class SolicitanteResumen(BaseModel):
+    """Identidad mínima del solicitante (P6): nunca DNI, email ni teléfono."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(examples=[7])
+    nombre: str = Field(examples=["Ana"])
+    apellido: str = Field(examples=["Pérez"])
+
+
 class OrdenPedidoResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -144,6 +159,16 @@ class OrdenPedidoResponse(BaseModel):
     observacion_docente: str | None = None
     motivo_resolucion: str | None = None
     es_renovado: bool = False
+    resuelto_en: AwareDatetime | None = Field(
+        default=None, description="Cuándo se aprobó, rechazó o canceló. Vacío si sigue pendiente."
+    )
+    solicitante: SolicitanteResumen | None = Field(
+        default=None,
+        description=(
+            "Nombre y apellido del solicitante. Solo se completa para administradores; "
+            "el dueño de la orden recibe null."
+        ),
+    )
     detalles: list[DetallePrestamoResponse] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]
@@ -155,6 +180,14 @@ class OrdenPedidoResponse(BaseModel):
             d.estado is EstadoDetalleEnum.ENTREGADO and d.devolucion_pactada < ahora
             for d in self.detalles
         )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def situacion(self) -> SituacionOrdenEnum:
+        """Derivada (RN-L31): en curso si alguna línea está pendiente, reservada o entregada."""
+        if any(d.estado in ESTADOS_DETALLE_EN_CURSO for d in self.detalles):
+            return SituacionOrdenEnum.EN_CURSO
+        return SituacionOrdenEnum.FINALIZADA
 
 
 # ---------------------------------------------------------------------------

@@ -6,11 +6,18 @@ de integración de cada fase.
 """
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
-from app.modules.loans.schemas import OrdenPedidoCreate, OrdenPedidoEstadoUpdate
+from app.modules.loans.enums import EstadoDetalleEnum as D
+from app.modules.loans.schemas import (
+    OrdenPedidoCreate,
+    OrdenPedidoEstadoUpdate,
+    OrdenPedidoResponse,
+)
+from app.modules.users.service import DatosPublicosUsuario
 
 TZ = timezone(timedelta(hours=-3))
 RETIRO = datetime(2026, 12, 1, 10, 0, tzinfo=TZ)
@@ -169,3 +176,75 @@ def test_estado_rechaza_estados_no_permitidos(estado):
 def test_estado_rechaza_campos_desconocidos():
     with pytest.raises(ValidationError):
         OrdenPedidoEstadoUpdate(estado="cancelada", sede="Ushuaia")
+
+
+# ── OrdenPedidoResponse ──────────────────────────────────────────────────────
+
+
+def _linea(estado: D, n: int = 1) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=n,
+        equipamiento_id=1,
+        unidad_fisica_id=None if estado is D.PENDIENTE else 5,
+        estado=estado,
+        retiro_pactado=RETIRO,
+        devolucion_pactada=DEVOLUCION,
+        fin_ocupacion=DEVOLUCION,
+    )
+
+
+def _respuesta(*estados: D, **extra) -> OrdenPedidoResponse:
+    """Valida un objeto con atributos, como hace FastAPI con el modelo ORM."""
+    orden = SimpleNamespace(
+        id=1,
+        solicitante_id=7,
+        sede="Ushuaia",
+        asignatura_id=None,
+        estado="aprobada",
+        fecha_solicitud=RETIRO,
+        observacion_docente=None,
+        motivo_resolucion=None,
+        es_renovado=False,
+        resuelto_en=None,
+        detalles=[_linea(e, n) for n, e in enumerate(estados, start=1)],
+        **extra,
+    )
+    return OrdenPedidoResponse.model_validate(orden)
+
+
+@pytest.mark.parametrize("estado", [D.PENDIENTE, D.RESERVADO, D.ENTREGADO])
+def test_situacion_en_curso_si_alguna_linea_sigue_activa(estado):  # AC-L61, RN-L31
+    assert _respuesta(D.DEVUELTO, estado).situacion == "en_curso"
+
+
+@pytest.mark.parametrize(
+    "estados",
+    [
+        (D.DEVUELTO,),
+        (D.DEVUELTO, D.CANCELADO),
+        (D.RECHAZADO, D.RECHAZADO),
+        (D.NO_RETIRADO, D.CANCELADO),
+    ],
+)
+def test_situacion_finalizada_si_ninguna_linea_sigue_activa(estados):  # AC-L61, RN-L31
+    assert _respuesta(*estados).situacion == "finalizada"
+
+
+def test_la_situacion_viaja_en_el_json():
+    assert _respuesta(D.PENDIENTE).model_dump(mode="json")["situacion"] == "en_curso"
+
+
+def test_sin_solicitante_ni_resolucion_por_defecto():
+    respuesta = _respuesta(D.PENDIENTE)  # el modelo ORM no tiene `solicitante`
+    assert respuesta.solicitante is None
+    assert respuesta.resuelto_en is None
+
+
+def test_el_solicitante_sale_de_users_y_solo_tiene_id_nombre_y_apellido():  # P6
+    datos = DatosPublicosUsuario(id=7, nombre="Ana", apellido="Pérez")
+    respuesta = _respuesta(D.PENDIENTE, solicitante=datos)
+    assert respuesta.model_dump(mode="json")["solicitante"] == {
+        "id": 7,
+        "nombre": "Ana",
+        "apellido": "Pérez",
+    }
