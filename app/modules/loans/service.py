@@ -10,7 +10,8 @@ Las reglas de negocio viven acá y los endpoints delegan en estas funciones.
 """
 
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 
 from sqlalchemy import func, select
@@ -238,6 +239,58 @@ async def unidades_libres(
     """
     libres = await ids_unidades_libres(db, equipamiento_ids, sede, desde, hasta)
     return {m: len(ids) for m, ids in libres.items()}
+
+
+# ── Ocupación por unidad (API pública para inventory, PRE-01) ────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class PeriodoOcupado:
+    """Un período ``[desde, hasta)`` en que la unidad está ocupada por una línea."""
+
+    desde: datetime
+    hasta: datetime
+
+
+async def ocupacion_de_unidades(
+    db: AsyncSession, unidad_ids: Iterable[int], desde: datetime, hasta: datetime
+) -> dict[int, list[PeriodoOcupado]]:
+    """API pública (§10.2): por unidad, los períodos ocupados que se solapan con ``[desde, hasta)``.
+
+    Para el mini-calendario y la disponibilidad por fechas del catálogo (PRE-01, Perfil 2,
+    INV-26): ``inventory`` pasa las unidades operativas de un modelo y arma el conteo por
+    día. Ocupan las líneas ``reservado`` y ``entregado``; cada período va de
+    ``retiro_pactado`` a ``fin_ocupacion``, sin recortar al rango pedido.
+
+    - Sin identidad (P6): no incluye orden, línea ni solicitante.
+    - No filtra por sede: la unidad ya la determina; la autorización es de quien llama.
+    - Siempre devuelve una clave por unidad pedida (lista vacía si está libre), sin
+      repetidos; los períodos salen ordenados por inicio.
+    - Una entrada vacía devuelve ``{}`` sin consultar; si no, una sola consulta.
+    - Un período vacío o invertido es un ``ValueError``. No hace ``commit`` ni ``flush``.
+    """
+    if hasta <= desde:
+        raise ValueError("El período debe terminar después de empezar.")
+    unicas = list(dict.fromkeys(unidad_ids))
+    if not unicas:
+        return {}
+    filas = await db.execute(
+        select(
+            DetallePrestamo.unidad_fisica_id,
+            DetallePrestamo.retiro_pactado,
+            DetallePrestamo.fin_ocupacion,
+        )
+        .where(
+            DetallePrestamo.unidad_fisica_id.in_(unicas),
+            DetallePrestamo.estado.in_(ESTADOS_DETALLE_QUE_OCUPAN),
+            DetallePrestamo.periodo.op("&&")(func.tstzrange(desde, hasta, "[)")),
+        )
+        .order_by(DetallePrestamo.unidad_fisica_id, DetallePrestamo.retiro_pactado)
+    )
+    ocupacion: dict[int, list[PeriodoOcupado]] = {u: [] for u in unicas}
+    for unidad_id, inicio, fin in filas:
+        ocupacion[unidad_id].append(PeriodoOcupado(desde=inicio, hasta=fin))
+    return ocupacion
 
 
 # ── Crear orden (POST /ordenes) ──────────────────────────────────────────────
