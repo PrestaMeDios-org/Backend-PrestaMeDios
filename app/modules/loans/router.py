@@ -5,8 +5,9 @@ listo antes de la lógica (API-First); las reglas vivirán en ``service.py``.
 
 Los errores de negocio se lanzan con ``AppError`` (``{detail, code}``) y se
 documentan con ``error_responses(...)``. Dónde aparece cada código (§6.3):
-  - ``POST /ordenes``: 404 ``EQUIPAMIENTO_NO_ENCONTRADO``; 422 de negocio
-    (``LIMITE_DIAS_EXCEDIDO``, ``FRANJA_FUERA_DE_HORARIO``, etc.).
+  - ``POST /ordenes``: 404 ``EQUIPAMIENTO_NO_ENCONTRADO``; 409
+    ``EQUIPAMIENTO_NO_DISPONIBLE`` (sin unidades libres en el período); 422 de
+    negocio (``LIMITE_DIAS_EXCEDIDO``, ``FRANJA_FUERA_DE_HORARIO``, etc.).
   - ``PATCH /ordenes/{id}/estado``: 409 ``TRANSICION_INVALIDA`` y
     ``UNIDAD_NO_DISPONIBLE`` (la base rechazó un solapamiento, SQLSTATE 23P01).
 """
@@ -18,11 +19,14 @@ from app.core.deps import get_current_user, require_roles
 from app.core.enums import RolUsuario, SedeEnum
 from app.core.errors import AppError, error_responses
 from app.database import get_db
+from app.modules.loans import service
 from app.modules.loans.enums import EstadoOrdenEnum
+from app.modules.loans.models import OrdenPedido
 from app.modules.loans.schemas import (
     OrdenPedidoCreate,
     OrdenPedidoEstadoUpdate,
     OrdenPedidoResponse,
+    ReglasResponse,
 )
 from app.modules.users.models import Usuario
 
@@ -40,6 +44,23 @@ def _pendiente() -> AppError:
     )
 
 
+# ── Reglas operativas ────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/reglas",
+    response_model=ReglasResponse,
+    summary="Reglas operativas vigentes",
+    responses=error_responses(401),
+)
+async def consultar_reglas(
+    actor: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ReglasResponse:
+    """Horario, anticipación y plazos vigentes, para armar el formulario (PRE-06, PRE-07)."""
+    return await service.reglas(db)
+
+
 # ── Solicitante (estudiante / docente) ───────────────────────────────────────
 
 
@@ -48,15 +69,18 @@ def _pendiente() -> AppError:
     response_model=OrdenPedidoResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Solicitar equipamiento (orden de pedido)",
-    responses=error_responses(401, 403, 404, 422),
+    responses=error_responses(401, 403, 404, 409, 422),
 )
 async def crear_orden(
     payload: OrdenPedidoCreate,
     actor: Usuario = Depends(_solo_solicitantes),
     db: AsyncSession = Depends(get_db),
-) -> OrdenPedidoResponse:
-    """Queda ``pendiente``; solicitante y sede salen de la sesión (PRE-03, 06, 07, 09)."""
-    raise _pendiente()
+) -> OrdenPedido:
+    """Queda ``pendiente``; solicitante y sede salen de la sesión (PRE-03, 06, 07, 09).
+
+    Las renovaciones responden ``501``: todavía no se implementan.
+    """
+    return await service.crear_orden(db, actor, payload)
 
 
 @router.get(
@@ -71,9 +95,9 @@ async def listar_mis_ordenes(
     offset: int = Query(default=0, ge=0),
     actor: Usuario = Depends(_solo_solicitantes),
     db: AsyncSession = Depends(get_db),
-) -> list[OrdenPedidoResponse]:
+) -> list[OrdenPedido]:
     """Estudiantes y docentes ven solo las propias (P6)."""
-    raise _pendiente()
+    return await service.listar_mis_ordenes(db, actor, estado, limit, offset)
 
 
 # ── Bandeja administrativa ───────────────────────────────────────────────────
@@ -107,9 +131,9 @@ async def obtener_orden(
     orden_id: int,
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> OrdenPedidoResponse:
-    """El alcance (dueño, sede, docente de la asignatura) lo resuelve el servicio."""
-    raise _pendiente()
+) -> OrdenPedido:
+    """Hoy solo lo ve el dueño; sede y docente se agregan en las fases 2 y 4."""
+    return await service.obtener_orden(db, actor, orden_id)
 
 
 @router.patch(

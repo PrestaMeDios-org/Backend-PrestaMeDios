@@ -69,6 +69,38 @@ def test_orden_limita_la_cantidad_de_lineas(items):
         _orden(items=items)
 
 
+def test_orden_sin_aval_ni_renovacion_por_defecto():
+    orden = _orden()
+    assert orden.pdf_aval_id is None
+    assert orden.renueva_detalle_id is None
+
+
+def test_orden_acepta_un_aval_uuid():  # PRE-05, SPEC-03 (archivos.id es UUID)
+    orden = _orden(pdf_aval_id="3f2b6c1e-8a4d-4f7e-9b1a-2c5d7e9f0a1b")
+    assert str(orden.pdf_aval_id) == "3f2b6c1e-8a4d-4f7e-9b1a-2c5d7e9f0a1b"
+
+
+@pytest.mark.parametrize("aval", ["no-es-un-uuid", 12])
+def test_orden_rechaza_un_aval_que_no_es_uuid(aval):
+    with pytest.raises(ValidationError):
+        _orden(pdf_aval_id=aval)
+
+
+def test_orden_de_renovacion_con_una_linea():  # RN-L24
+    assert _orden(renueva_detalle_id=42).renueva_detalle_id == 42
+
+
+def test_orden_de_renovacion_admite_una_sola_linea():  # RN-L24
+    with pytest.raises(ValidationError):
+        _orden(renueva_detalle_id=42, items=[{"equipamiento_id": 1}] * 2)
+
+
+@pytest.mark.parametrize("detalle", [0, -1])
+def test_orden_de_renovacion_exige_un_id_positivo(detalle):
+    with pytest.raises(ValidationError):
+        _orden(renueva_detalle_id=detalle)
+
+
 # ── OrdenPedidoEstadoUpdate ──────────────────────────────────────────────────
 
 
