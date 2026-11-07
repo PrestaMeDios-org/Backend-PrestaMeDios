@@ -110,15 +110,22 @@ async def listar_mis_ordenes(
     responses=error_responses(401, 403),
 )
 async def listar_bandeja(
-    estado: EstadoOrdenEnum | None = Query(default=EstadoOrdenEnum.PENDIENTE),
-    sede: SedeEnum | None = Query(default=None, description="Solo SUPERADMIN."),
+    estado: EstadoOrdenEnum = Query(default=EstadoOrdenEnum.PENDIENTE),
+    sede: SedeEnum | None = Query(
+        default=None,
+        description="Solo SUPERADMIN. Un ADMIN_LOCAL que pide otra sede recibe 403.",
+    ),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     actor: Usuario = Depends(_solo_admins),
     db: AsyncSession = Depends(get_db),
 ) -> list[OrdenPedidoResponse]:
-    """El admin local ve solo su sede; el superadmin ve ambas o la filtrada (PRE-15)."""
-    raise _pendiente()
+    """El admin local ve solo su sede; el superadmin ve ambas o la filtrada (PRE-15).
+
+    Por defecto, las pendientes, de la más vieja a la más nueva, con nombre y apellido
+    del solicitante (P6).
+    """
+    return await service.listar_bandeja(db, actor, estado, sede, limit, offset)
 
 
 @router.get(

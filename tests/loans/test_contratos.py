@@ -1,9 +1,9 @@
 """Contrato HTTP de `loans` en la Fase 0 (SPEC-05 §14; AC-L52, AC-L53).
 
-Los endpoints exigen sesión y rol. Los que todavía no tienen lógica (bandeja y
-cambio de estado) responden 501 ``NO_IMPLEMENTADO``. Crear orden se prueba en
-``test_crear_orden.py``. Estos tests se
-reemplazan por los de cada criterio a medida que se implementa cada fase.
+Los endpoints exigen sesión y rol. El cambio de estado, que todavía no tiene lógica,
+responde 501 ``NO_IMPLEMENTADO``. Crear orden se prueba en ``test_crear_orden.py`` y la
+bandeja en ``test_bandeja.py``. Estos tests se reemplazan por los de cada criterio a
+medida que se implementa cada fase.
 """
 
 import pytest
@@ -37,8 +37,6 @@ RUTAS = [
 
 # (rol, método, ruta, cuerpo) con permiso: llegan al placeholder
 PERMITIDAS = [
-    (A, "GET", "/ordenes", None),
-    (S, "GET", "/ordenes", None),
     (A, "PATCH", "/ordenes/1/estado", RECHAZO),
 ]
 

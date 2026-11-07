@@ -17,7 +17,7 @@ from datetime import datetime, time, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import puede_ver_sede
+from app.core.deps import puede_ver_sede, resolver_alcance_sede
 from app.core.enums import RolUsuario, SedeEnum
 from app.core.errors import AppError
 from app.core.settings import ZONA_HORARIA_LAB, ahora_lab
@@ -144,6 +144,34 @@ async def respuestas_de_ordenes(
         else r
         for r in respuestas
     ]
+
+
+async def listar_bandeja(
+    db: AsyncSession,
+    actor: Usuario,
+    estado: EstadoOrdenEnum,
+    sede: SedeEnum | None,
+    limit: int,
+    offset: int,
+) -> list[OrdenPedidoResponse]:
+    """Bandeja de validación (PRE-15): órdenes de la jurisdicción del administrador.
+
+    - Sedes con ``resolver_alcance_sede``: el ``ADMIN_LOCAL`` siempre la suya (pedir
+      otra responde ``403 SEDE_FUERA_DE_ALCANCE``); el ``SUPERADMIN``, la indicada o
+      ambas. El filtro va en el ``WHERE`` (RN-L26).
+    - De la más vieja a la más nueva, para atender primero lo que espera hace más.
+    - Con el resumen del solicitante (P6).
+    """
+    sedes = resolver_alcance_sede(actor, sede)
+    stmt = (
+        select(OrdenPedido)
+        .where(OrdenPedido.sede.in_(sedes), OrdenPedido.estado == estado)
+        .order_by(OrdenPedido.fecha_solicitud.asc(), OrdenPedido.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    ordenes = list((await db.scalars(stmt)).all())
+    return await respuestas_de_ordenes(db, actor, ordenes)
 
 
 async def obtener_orden(db: AsyncSession, actor: Usuario, orden_id: int) -> OrdenPedidoResponse:

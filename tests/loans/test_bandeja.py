@@ -100,3 +100,90 @@ async def test_el_dueño_sigue_viendo_su_orden_sin_su_resumen(client, db, crear_
     r = await client.get(f"{BASE}/ordenes/{orden.id}", headers=auth(ana))
     assert r.status_code == 200
     assert r.json()["solicitante"] is None
+
+
+# ── GET /ordenes (bandeja) ───────────────────────────────────────────────────
+
+
+async def _ids(client, usuario, **params) -> list[int]:
+    r = await client.get(f"{BASE}/ordenes", params=params, headers=auth(usuario))
+    assert r.status_code == 200, r.json()
+    return [o["id"] for o in r.json()]
+
+
+async def test_el_admin_local_ve_las_pendientes_de_su_sede_de_la_mas_vieja_a_la_mas_nueva(
+    client, db, crear_usuario
+):  # AC-L17, PRE-15
+    ana = await crear_usuario(E, USH)
+    beto = await crear_usuario(E, RG)
+    primera = await _orden(db, ana)
+    await _orden(db, beto, sede=RG)
+    segunda = await _orden(db, ana)
+    await _orden(db, ana, estado=EstadoOrdenEnum.APROBADA)
+    admin = await crear_usuario(A, USH)
+
+    assert await _ids(client, admin) == [primera.id, segunda.id]
+
+
+async def test_la_bandeja_trae_el_resumen_de_cada_solicitante(client, db, crear_usuario):  # P6
+    ana = await crear_usuario(E, USH, nombre="Ana", apellido="Pérez")
+    beto = await crear_usuario(D, USH, nombre="Beto", apellido="Gómez")
+    await _orden(db, ana)
+    await _orden(db, beto)
+    admin = await crear_usuario(A, USH)
+
+    r = await client.get(f"{BASE}/ordenes", headers=auth(admin))
+
+    resumenes = [(o["solicitante"]["nombre"], o["solicitante"]["apellido"]) for o in r.json()]
+    assert resumenes == [("Ana", "Pérez"), ("Beto", "Gómez")]
+    assert not _claves(r.json()) & CAMPOS_PRIVADOS
+
+
+async def test_se_filtra_por_estado(client, db, crear_usuario):  # AC-L17
+    ana = await crear_usuario(E, USH)
+    await _orden(db, ana)
+    aprobada = await _orden(db, ana, estado=EstadoOrdenEnum.APROBADA)
+    admin = await crear_usuario(A, USH)
+    assert await _ids(client, admin, estado="aprobada") == [aprobada.id]
+
+
+async def test_el_superadmin_ve_ambas_sedes_o_filtra_por_una(client, db, crear_usuario):  # AC-L17
+    ana = await crear_usuario(E, USH)
+    beto = await crear_usuario(E, RG)
+    de_ushuaia = await _orden(db, ana)
+    de_rio_grande = await _orden(db, beto, sede=RG)
+    superadmin = await crear_usuario(S)
+
+    assert await _ids(client, superadmin) == [de_ushuaia.id, de_rio_grande.id]
+    assert await _ids(client, superadmin, sede=RG.value) == [de_rio_grande.id]
+
+
+async def test_el_admin_local_no_puede_pedir_otra_sede(client, db, crear_usuario):  # RN-L26
+    admin = await crear_usuario(A, USH)
+    otra = await client.get(f"{BASE}/ordenes", params={"sede": RG.value}, headers=auth(admin))
+    propia = await client.get(f"{BASE}/ordenes", params={"sede": USH.value}, headers=auth(admin))
+    assert otra.status_code == 403
+    assert otra.json()["code"] == "SEDE_FUERA_DE_ALCANCE"
+    assert propia.status_code == 200
+
+
+async def test_la_bandeja_pagina_con_limit_y_offset(client, db, crear_usuario):  # AC-L18
+    ana = await crear_usuario(E, USH)
+    ordenes = [await _orden(db, ana) for _ in range(3)]
+    admin = await crear_usuario(A, USH)
+
+    assert await _ids(client, admin, limit=2) == [ordenes[0].id, ordenes[1].id]
+    assert await _ids(client, admin, limit=2, offset=2) == [ordenes[2].id]
+
+
+async def test_la_bandeja_vacia_devuelve_una_lista_vacia(client, crear_usuario):
+    admin = await crear_usuario(A, USH)
+    assert await _ids(client, admin) == []
+
+
+@pytest.mark.parametrize("rol", [E, D])
+async def test_estudiantes_y_docentes_no_acceden_a_la_bandeja(client, crear_usuario, rol):
+    # AC-L17
+    usuario = await crear_usuario(rol, USH)
+    r = await client.get(f"{BASE}/ordenes", headers=auth(usuario))
+    assert r.status_code == 403
