@@ -12,7 +12,8 @@ parámetros globales editables del módulo `config`):
   - anticipación mínima (``solicitud.anticipacion_min_horas``)
   - asignatura obligatoria para estudiantes (el rol sale de la sesión)
   - motivo obligatorio al rechazar o cancelar (``MOTIVO_REQUERIDO``)
-  - PDF obligatorio si hay ítems de alta gama
+  - PDF obligatorio si hay ítems de alta gama (``pdf_aval_id``)
+  - que ``renueva_detalle_id`` sea una línea ``entregado`` propia de una notebook
   - solapamientos de reservas (los resuelve la base de datos)
 El solicitante y la sede salen siempre de la sesión, nunca del body.
 Los errores de negocio usan ``AppError`` (``{detail, code}``), no esquemas propios.
@@ -20,6 +21,7 @@ Los errores de negocio usan ``AppError`` (``{detail, code}``), no esquemas propi
 
 from datetime import UTC, datetime, time
 from typing import Literal
+from uuid import UUID
 
 from pydantic import (
     AwareDatetime,
@@ -104,9 +106,29 @@ class OrdenPedidoCreate(BaseModel):
     acepta_normativa: Literal[True] = Field(
         description="Debe ser true: el usuario acepta la normativa vigente."
     )
+    pdf_aval_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Id del PDF de aval subido con `POST /api/v1/files/archivos` "
+            "(`proposito=AVAL_PRESTAMO`). Obligatorio si algún ítem es de alta gama (PRE-05)."
+        ),
+        examples=["3f2b6c1e-8a4d-4f7e-9b1a-2c5d7e9f0a1b"],
+    )
+    renueva_detalle_id: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Renovación (PRE-11): línea `entregado` propia, de una notebook, que se renueva. "
+            "La orden debe tener una sola línea, del mismo modelo."
+        ),
+        examples=[42],
+    )
+
     @model_validator(mode="after")
     def _validar_fechas(self) -> "OrdenPedidoCreate":
         _validar_rango(self.retiro, self.devolucion)
+        if self.renueva_detalle_id is not None and len(self.items) != 1:
+            raise ValueError("Una renovación lleva una sola línea")
         return self
 
 
