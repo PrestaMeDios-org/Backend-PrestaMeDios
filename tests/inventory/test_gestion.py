@@ -285,21 +285,29 @@ async def test_mismo_estado_es_idempotente(client, db, crear_equipo, crear_usuar
 
 
 async def test_cambios_concurrentes_de_estado(client, db, crear_equipo, crear_usuario):  # INV-21
-    await crear_equipo("CAM-1", unidades=((USH,),))
-    uid = await _unidad_id(db, "CAM-1-U1")
-    admin = await crear_usuario(R.ADMIN_LOCAL, USH)
-    h = auth(admin)
-    respuestas = await asyncio.gather(
-        client.patch(f"{B}/unidades/{uid}/estado", json={"estado": "baja"}, headers=h),
-        client.patch(f"{B}/unidades/{uid}/estado", json={"estado": "disponible"}, headers=h),
-        client.patch(f"{B}/unidades/{uid}/estado", json={"estado": "mantenimiento"}, headers=h),
-    )
-    assert all(r.status_code in (200, 409) for r in respuestas)
-    # Con `baja` terminal, el resultado depende del orden pero nunca queda incoherente:
-    # si `baja` se aplicó, la unidad no puede haber vuelto a otro estado.
-    final = await _estado(db, uid)
-    estados_ok = [r.json()["estado"] for r in respuestas if r.status_code == 200]
-    if "baja" in estados_ok:
-        assert final == E.BAJA
-    assert final in (E.BAJA, E.MANTENIMIENTO, E.DISPONIBLE)
+    # Cada unidad recibe a la vez `baja` y `mantenimiento`. Como `baja` es terminal (D-03),
+    # el resultado correcto no depende del orden: `baja` siempre se aplica (200), la unidad
+    # termina en `baja` y `mantenimiento` responde 200 (si llegó antes) o 409 (si llegó
+    # después). Sin `FOR UPDATE`, ambos leen `disponible` y el último en escribir pisa al
+    # otro: la unidad puede terminar en `mantenimiento` aunque `baja` haya respondido 200.
+    cantidad = 10
+    await crear_equipo("CAM-1", unidades=tuple((USH,) for _ in range(cantidad)))
+    ids = [await _unidad_id(db, f"CAM-1-U{i}") for i in range(1, cantidad + 1)]
+    h = auth(await crear_usuario(R.ADMIN_LOCAL, USH))
+    pedidos = [
+        (uid, estado, client.patch(f"{B}/unidades/{uid}/estado", json={"estado": estado}, headers=h))
+        for uid in ids
+        for estado in ("baja", "mantenimiento")
+    ]
+    respuestas = await asyncio.gather(*(p[2] for p in pedidos))
+
+    for (uid, estado, _), r in zip(pedidos, respuestas, strict=True):
+        if estado == "baja":
+            assert r.status_code == 200, (uid, r.text)
+        else:
+            assert r.status_code in (200, 409), (uid, r.text)
+            if r.status_code == 409:
+                assert r.json()["code"] == "TRANSICION_ESTADO_INVALIDA"
+    for uid in ids:
+        assert await _estado(db, uid) == E.BAJA, f"la unidad {uid} perdió la baja (carrera)"
 
