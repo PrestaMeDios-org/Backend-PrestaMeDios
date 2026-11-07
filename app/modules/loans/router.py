@@ -5,8 +5,9 @@ listo antes de la lógica (API-First); las reglas vivirán en ``service.py``.
 
 Los errores de negocio se lanzan con ``AppError`` (``{detail, code}``) y se
 documentan con ``error_responses(...)``. Dónde aparece cada código (§6.3):
-  - ``POST /ordenes``: 404 ``EQUIPAMIENTO_NO_ENCONTRADO``; 422 de negocio
-    (``LIMITE_DIAS_EXCEDIDO``, ``FRANJA_FUERA_DE_HORARIO``, etc.).
+  - ``POST /ordenes``: 404 ``EQUIPAMIENTO_NO_ENCONTRADO``; 409
+    ``EQUIPAMIENTO_NO_DISPONIBLE`` (sin unidades libres en el período); 422 de
+    negocio (``LIMITE_DIAS_EXCEDIDO``, ``FRANJA_FUERA_DE_HORARIO``, etc.).
   - ``PATCH /ordenes/{id}/estado``: 409 ``TRANSICION_INVALIDA`` y
     ``UNIDAD_NO_DISPONIBLE`` (la base rechazó un solapamiento, SQLSTATE 23P01).
 """
@@ -68,15 +69,18 @@ async def consultar_reglas(
     response_model=OrdenPedidoResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Solicitar equipamiento (orden de pedido)",
-    responses=error_responses(401, 403, 404, 422),
+    responses=error_responses(401, 403, 404, 409, 422),
 )
 async def crear_orden(
     payload: OrdenPedidoCreate,
     actor: Usuario = Depends(_solo_solicitantes),
     db: AsyncSession = Depends(get_db),
-) -> OrdenPedidoResponse:
-    """Queda ``pendiente``; solicitante y sede salen de la sesión (PRE-03, 06, 07, 09)."""
-    raise _pendiente()
+) -> OrdenPedido:
+    """Queda ``pendiente``; solicitante y sede salen de la sesión (PRE-03, 06, 07, 09).
+
+    Las renovaciones responden ``501``: todavía no se implementan.
+    """
+    return await service.crear_orden(db, actor, payload)
 
 
 @router.get(

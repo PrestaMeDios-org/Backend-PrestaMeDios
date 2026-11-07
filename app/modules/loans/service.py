@@ -9,20 +9,25 @@ Las reglas de negocio viven acá y los endpoints delegan en estas funciones.
 - ``get_db`` no hace ``commit``: lo hace el servicio cuando escribe.
 """
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import datetime, time, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import SedeEnum
+from app.core.enums import RolUsuario, SedeEnum
 from app.core.errors import AppError
-from app.core.settings import ZONA_HORARIA_LAB
+from app.core.settings import ZONA_HORARIA_LAB, ahora_lab
 from app.modules.config.service import obtener_parametro
-from app.modules.inventory.service import unidades_asignables
-from app.modules.loans.enums import ESTADOS_DETALLE_QUE_OCUPAN, EstadoOrdenEnum
+from app.modules.inventory.service import datos_equipamiento_por_ids, unidades_asignables
+from app.modules.loans.enums import (
+    ESTADOS_DETALLE_QUE_OCUPAN,
+    EstadoDetalleEnum,
+    EstadoOrdenEnum,
+)
 from app.modules.loans.models import DetallePrestamo, OrdenPedido
-from app.modules.loans.schemas import ReglasResponse
+from app.modules.loans.schemas import OrdenPedidoCreate, ReglasResponse
 from app.modules.users.models import Usuario
 
 # ── Lectura de parámetros ────────────────────────────────────────────────────
@@ -233,3 +238,106 @@ async def unidades_libres(
     """
     libres = await ids_unidades_libres(db, equipamiento_ids, sede, desde, hasta)
     return {m: len(ids) for m, ids in libres.items()}
+
+
+# ── Crear orden (POST /ordenes) ──────────────────────────────────────────────
+
+
+def equipamiento_no_encontrado(equipamiento_id: int) -> AppError:
+    return AppError(
+        404,
+        "EQUIPAMIENTO_NO_ENCONTRADO",
+        "El equipo pedido no existe o no está disponible para préstamo.",
+        equipamiento_id=equipamiento_id,
+    )
+
+
+async def crear_orden(db: AsyncSession, actor: Usuario, payload: OrdenPedidoCreate) -> OrdenPedido:
+    """Crea una orden ``pendiente`` con sus líneas ``pendiente`` (RN-L01…L10).
+
+    Valida todo antes de escribir: un ``AppError`` de los pasos previos no deja nada
+    que deshacer. Solo el último paso escribe, y si falla se hace ``rollback``.
+
+    Los datos de los ítems salen de ``inventory.datos_equipamiento_por_ids`` (C8), sin
+    leer sus modelos (P3.3). Primera versión (corte acordado mientras llega ``files``):
+    la renovación responde ``501`` y un ítem de alta gama responde
+    ``422 AVAL_REQUERIDO`` aunque traiga ``pdf_aval_id``, porque todavía no se
+    puede vincular el archivo.
+    """
+    # 1. Rol y sede salen de la sesión (RN-L01, RN-L02); asignatura (RN-L07).
+    if payload.renueva_detalle_id is not None:
+        raise AppError(501, "NO_IMPLEMENTADO", "La renovación todavía no está disponible.")
+    if actor.rol is RolUsuario.ESTUDIANTE and payload.asignatura_id is None:
+        raise AppError(
+            422, "ASIGNATURA_REQUERIDA", "Indicá la asignatura para la que pedís el equipo."
+        )
+    sede = actor.sede
+    assert sede is not None, "Solo estudiantes y docentes crean órdenes, y tienen sede"
+    retiro, devolucion = payload.retiro, payload.devolucion
+
+    # 2. Parámetros (RN-L28). Horario global hasta que config publique el de cada sede (K10).
+    apertura = await _hora(db, "horario.apertura")
+    cierre = await _hora(db, "horario.cierre")
+    anticipacion = await _entero(db, "solicitud.anticipacion_min_horas")
+    max_general = await _entero(db, "prestamo.general.max_dias")
+    max_notebook = await _entero(db, "prestamo.notebook.max_dias")
+
+    # 3. Franja y anticipación (RN-L04, RN-L05).
+    _validar_franja(retiro, devolucion, apertura, cierre)
+    _validar_anticipacion(retiro, ahora_lab(), anticipacion)
+
+    # 4. Datos de los ítems (RN-L10): inexistente o inactivo responde 404.
+    solicitadas = Counter(item.equipamiento_id for item in payload.items)
+    modelos = list(solicitadas)
+    datos = await datos_equipamiento_por_ids(db, modelos)
+    for equipamiento_id in modelos:
+        item = datos.get(equipamiento_id)
+        if item is None or not item.activo:
+            raise equipamiento_no_encontrado(equipamiento_id)
+
+    # 5. Aval (RN-L09). Sin files en develop, la alta gama todavía no se puede pedir.
+    for equipamiento_id in modelos:
+        if datos[equipamiento_id].alta_gama:
+            raise AppError(
+                422,
+                "AVAL_REQUERIDO",
+                "Este equipo es de alta gama y requiere el aval en PDF.",
+                equipamiento_id=equipamiento_id,
+            )
+
+    # 6. Plazo por línea (RN-L06).
+    for equipamiento_id in modelos:
+        item = datos[equipamiento_id]
+        limite = _limite_dias(item.es_notebook, max_general, max_notebook, item.max_dias_prestamo)
+        _validar_plazo(retiro, devolucion, limite, equipamiento_id)
+
+    # 7. Disponibilidad para el período (RN-L10). Las líneas pendientes no ocupan (RN-L03).
+    libres = await ids_unidades_libres(db, modelos, sede, retiro, devolucion)
+    _validar_disponibilidad(solicitadas, libres)
+
+    # 8. Persistir en una sola transacción.
+    orden = OrdenPedido(
+        solicitante_id=actor.id,
+        sede=sede,
+        asignatura_id=payload.asignatura_id,
+        estado=EstadoOrdenEnum.PENDIENTE,
+        detalles=[
+            DetallePrestamo(
+                equipamiento_id=item.equipamiento_id,
+                estado=EstadoDetalleEnum.PENDIENTE,
+                retiro_pactado=retiro,
+                devolucion_pactada=devolucion,
+                fin_ocupacion=devolucion,
+            )
+            for item in payload.items
+        ],
+    )
+    db.add(orden)
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    await db.refresh(orden)  # fecha_solicitud la pone la base
+    return orden
+
