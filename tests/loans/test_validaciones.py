@@ -128,3 +128,39 @@ def test_plazo_excedido_identifica_el_item_y_el_maximo():  # AC-L10
     assert exc.value.status_code == 422
     assert exc.value.code == "LIMITE_DIAS_EXCEDIDO"
     assert exc.value.extra == {"equipamiento_id": 7, "max_dias": 4}
+
+
+# ── Disponibilidad (RN-L10) ──────────────────────────────────────────────────
+
+
+def test_disponibilidad_suficiente_es_valida():  # AC-L56
+    service._validar_disponibilidad({1: 2, 2: 1}, {1: [10, 11, 12], 2: [20]})
+
+
+def test_disponibilidad_justa_es_valida():  # AC-L57
+    service._validar_disponibilidad({1: 2}, {1: [10, 11]})
+
+
+def test_disponibilidad_sin_lineas_es_valida():
+    service._validar_disponibilidad({}, {})
+
+
+def test_modelo_sin_unidades_libres_se_rechaza():  # AC-L56
+    with pytest.raises(AppError) as exc:
+        service._validar_disponibilidad({1: 1}, {1: []})
+    assert exc.value.status_code == 409
+    assert exc.value.code == "EQUIPAMIENTO_NO_DISPONIBLE"
+    assert exc.value.extra == {"equipamiento_id": 1, "solicitadas": 1, "libres": 0}
+
+
+def test_modelo_ausente_del_resultado_cuenta_como_sin_unidades():  # AC-L56
+    with pytest.raises(AppError) as exc:
+        service._validar_disponibilidad({7: 1}, {})
+    assert exc.value.code == "EQUIPAMIENTO_NO_DISPONIBLE"
+
+
+def test_mas_lineas_que_unidades_libres_se_rechaza():  # AC-L57
+    with pytest.raises(AppError) as exc:
+        service._validar_disponibilidad({1: 3, 2: 1}, {1: [10, 11], 2: [20]})
+    assert exc.value.code == "EQUIPAMIENTO_NO_DISPONIBLE"
+    assert exc.value.extra == {"equipamiento_id": 1, "solicitadas": 3, "libres": 2}

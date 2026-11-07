@@ -9,16 +9,19 @@ Las reglas de negocio viven acá y los endpoints delegan en estas funciones.
 - ``get_db`` no hace ``commit``: lo hace el servicio cuando escribe.
 """
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime, time, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.enums import SedeEnum
 from app.core.errors import AppError
 from app.core.settings import ZONA_HORARIA_LAB
 from app.modules.config.service import obtener_parametro
-from app.modules.loans.enums import EstadoOrdenEnum
-from app.modules.loans.models import OrdenPedido
+from app.modules.inventory.service import unidades_asignables
+from app.modules.loans.enums import ESTADOS_DETALLE_QUE_OCUPAN, EstadoOrdenEnum
+from app.modules.loans.models import DetallePrestamo, OrdenPedido
 from app.modules.loans.schemas import ReglasResponse
 from app.modules.users.models import Usuario
 
@@ -145,3 +148,88 @@ def _validar_plazo(
             equipamiento_id=equipamiento_id,
             max_dias=limite,
         )
+
+
+def _validar_disponibilidad(
+    solicitadas: Mapping[int, int], libres: Mapping[int, Sequence[int]]
+) -> None:
+    """RN-L10: por cada modelo, las unidades libres alcanzan para las líneas pedidas."""
+    for equipamiento_id, cantidad in solicitadas.items():
+        disponibles = len(libres.get(equipamiento_id, ()))
+        if cantidad > disponibles:
+            detalle = (
+                "Este equipo no tiene unidades libres."
+                if disponibles == 0
+                else f"Solo hay {disponibles} unidades libres de este equipo y pediste {cantidad}."
+            )
+            raise AppError(
+                409,
+                "EQUIPAMIENTO_NO_DISPONIBLE",
+                detalle,
+                equipamiento_id=equipamiento_id,
+                solicitadas=cantidad,
+                libres=disponibles,
+            )
+
+
+# ── Unidades libres por período (RN-L10, D-L17 descartada: criterio por fechas) ──
+
+
+async def _ocupadas_en_periodo(
+    db: AsyncSession, unidad_ids: list[int], desde: datetime, hasta: datetime
+) -> set[int]:
+    """Unidades con una línea que ocupa y se solapa con ``[desde, hasta)``.
+
+    Ocupan los estados de ``ESTADOS_DETALLE_QUE_OCUPAN``, los mismos del ``EXCLUDE``.
+    """
+    if not unidad_ids:
+        return set()
+    stmt = select(DetallePrestamo.unidad_fisica_id).where(
+        DetallePrestamo.unidad_fisica_id.in_(unidad_ids),
+        DetallePrestamo.estado.in_(ESTADOS_DETALLE_QUE_OCUPAN),
+        DetallePrestamo.periodo.op("&&")(func.tstzrange(desde, hasta, "[)")),
+    )
+    return set((await db.scalars(stmt)).all())
+
+
+async def ids_unidades_libres(
+    db: AsyncSession,
+    equipamiento_ids: list[int],
+    sede: SedeEnum,
+    desde: datetime,
+    hasta: datetime,
+) -> dict[int, list[int]]:
+    """Por modelo, los ids de las unidades libres en la sede para ``[desde, hasta)`` (RN-L10).
+
+    Unidad libre = figura en ``inventory.unidades_asignables`` (``disponible`` hoy, de un
+    ítem activo) y no tiene ninguna línea ``reservado`` o ``entregado`` que se solape con
+    el período. Una reserva en otras fechas no la ocupa. Las líneas ``pendiente`` no
+    cuentan. Es una verificación previa (P7.2): la garantía final es el ``EXCLUDE``.
+    Los ids salen en el orden de ``inventory`` (por código de inventario). Uso interno
+    de ``loans``: creación (RN-L10) y ``GET /ordenes/{id}/unidades-libres`` (RN-L12).
+    """
+    if hasta <= desde:
+        raise ValueError("El período debe terminar después de empezar.")
+    modelos = list(dict.fromkeys(equipamiento_ids))  # sin repetidos, en orden
+    candidatas = {m: await unidades_asignables(db, m, sede) for m in modelos}
+    ocupadas = await _ocupadas_en_periodo(
+        db, [u for ids in candidatas.values() for u in ids], desde, hasta
+    )
+    return {m: [u for u in ids if u not in ocupadas] for m, ids in candidatas.items()}
+
+
+async def unidades_libres(
+    db: AsyncSession,
+    equipamiento_ids: list[int],
+    sede: SedeEnum,
+    desde: datetime,
+    hasta: datetime,
+) -> dict[int, int]:
+    """API pública (§10.2): por modelo, cuántas unidades están libres en ``[desde, hasta)``.
+
+    Mismo criterio que RN-L10. Devuelve solo cantidades, sin identidad de unidades ni de
+    solicitantes. Sirve al mini-calendario del catálogo (PRE-01, Perfil 2, INV-26).
+    Un modelo inexistente, inactivo o de otra sede vale 0. No hace ``commit``.
+    """
+    libres = await ids_unidades_libres(db, equipamiento_ids, sede, desde, hasta)
+    return {m: len(ids) for m, ids in libres.items()}
