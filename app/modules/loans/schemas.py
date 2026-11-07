@@ -3,9 +3,22 @@
 - ``*Create`` / ``*EstadoUpdate``: payloads de entrada, estrictos
   (``extra="forbid"``, trim).
 - ``*Response``: serializan modelos ORM vía ``from_attributes=True``.
+
+Qué NO se valida acá (depende de otro dominio, de la sesión o de los
+parámetros globales editables del módulo `config`):
+  - franja operativa (``horario.apertura`` / ``horario.cierre``)
+  - límite de días (``prestamo.general.max_dias``, ``prestamo.notebook.max_dias``
+    y/o ``Equipamiento.max_dias_prestamo``)
+  - anticipación mínima (``solicitud.anticipacion_min_horas``)
+  - asignatura obligatoria para estudiantes (el rol sale de la sesión)
+  - motivo obligatorio al rechazar o cancelar (``MOTIVO_REQUERIDO``)
+  - PDF obligatorio si hay ítems de alta gama
+  - solapamientos de reservas (los resuelve la base de datos)
+El solicitante y la sede salen siempre de la sesión, nunca del body.
+Los errores de negocio usan ``AppError`` (``{detail, code}``), no esquemas propios.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from typing import Literal
 
 from pydantic import (
@@ -27,6 +40,20 @@ def _validar_rango(retiro: datetime, devolucion: datetime) -> None:
     """Única regla de fechas que no depende de parámetros globales."""
     if devolucion <= retiro:
         raise ValueError("La devolución debe ser posterior al retiro")
+
+
+# ---------------------------------------------------------------------------
+# Reglas operativas
+# ---------------------------------------------------------------------------
+class ReglasResponse(BaseModel):
+    """Reglas operativas vigentes, leídas de `config` (SPEC-05 §6.2, D-L07)."""
+
+    horario_apertura: time = Field(examples=["09:00:00"])
+    horario_cierre: time = Field(examples=["16:00:00"])
+    anticipacion_min_horas: int = Field(examples=[24])
+    max_dias_general: int = Field(examples=[4])
+    max_dias_notebook: int = Field(examples=[15])
+    tolerancia_retiro_horas: int = Field(examples=[2])
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +104,6 @@ class OrdenPedidoCreate(BaseModel):
     acepta_normativa: Literal[True] = Field(
         description="Debe ser true: el usuario acepta la normativa vigente."
     )
-
     @model_validator(mode="after")
     def _validar_fechas(self) -> "OrdenPedidoCreate":
         _validar_rango(self.retiro, self.devolucion)

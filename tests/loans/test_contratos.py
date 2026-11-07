@@ -1,8 +1,8 @@
-"""Contrato HTTP de `loans` (SPEC-05 §14; AC-L52, AC-L53).
+"""Contrato HTTP de `loans` en la Fase 0 (SPEC-05 §14; AC-L52, AC-L53).
 
-Los endpoints exigen sesión y rol, y responden 501 ``NO_IMPLEMENTADO`` hasta
-que exista ``service.py``. Estos tests se reemplazan por los de cada criterio a
-medida que se implementa la lógica de las fases siguientes.
+Los endpoints exigen sesión y rol. Los que todavía no tienen lógica (crear orden,
+bandeja y cambio de estado) responden 501 ``NO_IMPLEMENTADO``. Estos tests se
+reemplazan por los de cada criterio a medida que se implementa cada fase.
 """
 
 import pytest
@@ -38,11 +38,8 @@ RUTAS = [
 PERMITIDAS = [
     (E, "POST", "/ordenes", ORDEN),
     (D, "POST", "/ordenes", ORDEN),
-    (E, "GET", "/ordenes/mias", None),
-    (D, "GET", "/ordenes/mias", None),
     (A, "GET", "/ordenes", None),
     (S, "GET", "/ordenes", None),
-    (E, "GET", "/ordenes/1", None),
     (A, "PATCH", "/ordenes/1/estado", RECHAZO),
 ]
 
@@ -100,7 +97,8 @@ async def test_mias_no_se_confunde_con_el_detalle(client, crear_usuario):
     """``/ordenes/mias`` se declara antes de ``/ordenes/{orden_id}``."""
     usuario = await crear_usuario(E)
     r = await client.get(f"{BASE}/ordenes/mias", headers=auth(usuario))
-    assert r.status_code == 501  # y no 422 por intentar convertir "mias" a entero
+    assert r.status_code == 200  # y no 422 por intentar convertir "mias" a entero
+    assert r.json() == []
 
 
 async def test_openapi_publica_las_rutas_del_spec(client):

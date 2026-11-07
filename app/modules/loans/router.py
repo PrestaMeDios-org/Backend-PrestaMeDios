@@ -18,11 +18,14 @@ from app.core.deps import get_current_user, require_roles
 from app.core.enums import RolUsuario, SedeEnum
 from app.core.errors import AppError, error_responses
 from app.database import get_db
+from app.modules.loans import service
 from app.modules.loans.enums import EstadoOrdenEnum
+from app.modules.loans.models import OrdenPedido
 from app.modules.loans.schemas import (
     OrdenPedidoCreate,
     OrdenPedidoEstadoUpdate,
     OrdenPedidoResponse,
+    ReglasResponse,
 )
 from app.modules.users.models import Usuario
 
@@ -38,6 +41,23 @@ def _pendiente() -> AppError:
         "NO_IMPLEMENTADO",
         "Endpoint definido por contrato; lógica pendiente.",
     )
+
+
+# ── Reglas operativas ────────────────────────────────────────────────────────
+
+
+@router.get(
+    "/reglas",
+    response_model=ReglasResponse,
+    summary="Reglas operativas vigentes",
+    responses=error_responses(401),
+)
+async def consultar_reglas(
+    actor: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ReglasResponse:
+    """Horario, anticipación y plazos vigentes, para armar el formulario (PRE-06, PRE-07)."""
+    return await service.reglas(db)
 
 
 # ── Solicitante (estudiante / docente) ───────────────────────────────────────
@@ -71,9 +91,9 @@ async def listar_mis_ordenes(
     offset: int = Query(default=0, ge=0),
     actor: Usuario = Depends(_solo_solicitantes),
     db: AsyncSession = Depends(get_db),
-) -> list[OrdenPedidoResponse]:
+) -> list[OrdenPedido]:
     """Estudiantes y docentes ven solo las propias (P6)."""
-    raise _pendiente()
+    return await service.listar_mis_ordenes(db, actor, estado, limit, offset)
 
 
 # ── Bandeja administrativa ───────────────────────────────────────────────────
@@ -107,9 +127,9 @@ async def obtener_orden(
     orden_id: int,
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> OrdenPedidoResponse:
-    """El alcance (dueño, sede, docente de la asignatura) lo resuelve el servicio."""
-    raise _pendiente()
+) -> OrdenPedido:
+    """Hoy solo lo ve el dueño; sede y docente se agregan en las fases 2 y 4."""
+    return await service.obtener_orden(db, actor, orden_id)
 
 
 @router.patch(
