@@ -17,6 +17,7 @@ from datetime import datetime, time, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.deps import puede_ver_sede
 from app.core.enums import RolUsuario, SedeEnum
 from app.core.errors import AppError
 from app.core.settings import ZONA_HORARIA_LAB, ahora_lab
@@ -28,8 +29,14 @@ from app.modules.loans.enums import (
     EstadoOrdenEnum,
 )
 from app.modules.loans.models import DetallePrestamo, OrdenPedido
-from app.modules.loans.schemas import OrdenPedidoCreate, ReglasResponse
+from app.modules.loans.schemas import (
+    OrdenPedidoCreate,
+    OrdenPedidoResponse,
+    ReglasResponse,
+    SolicitanteResumen,
+)
 from app.modules.users.models import Usuario
+from app.modules.users.service import datos_publicos_por_ids
 
 # ── Lectura de parámetros ────────────────────────────────────────────────────
 
@@ -84,15 +91,65 @@ async def listar_mis_ordenes(
     return list((await db.scalars(stmt)).all())
 
 
-async def obtener_orden(db: AsyncSession, actor: Usuario, orden_id: int) -> OrdenPedido:
-    """Detalle de una orden. En la Fase 1 solo la ve su dueño; para el resto, 404 (P6)."""
-    stmt = select(OrdenPedido).where(
-        OrdenPedido.id == orden_id, OrdenPedido.solicitante_id == actor.id
-    )
+# ── Alcance y respuestas (Fase 2) ────────────────────────────────────────────
+
+_ROLES_ADMIN = (RolUsuario.ADMIN_LOCAL, RolUsuario.SUPERADMIN)
+
+
+def _es_admin(actor: Usuario) -> bool:
+    return actor.rol in _ROLES_ADMIN
+
+
+def _puede_ver(actor: Usuario, orden: OrdenPedido) -> bool:
+    """La ve el dueño y el administrador con jurisdicción sobre su sede (RN-L25, RN-L26)."""
+    if orden.solicitante_id == actor.id:
+        return True
+    return _es_admin(actor) and puede_ver_sede(actor, orden.sede)
+
+
+async def _orden_con_alcance(
+    db: AsyncSession, actor: Usuario, orden_id: int, *, bloquear: bool = False
+) -> OrdenPedido:
+    """La orden si ``actor`` puede verla; si no existe o no tiene alcance, 404 (nunca 403).
+
+    Con ``bloquear=True`` la lee con ``SELECT ... FOR UPDATE`` para serializar las
+    transiciones de la orden (RN-L14) y descarta lo que hubiera en la sesión.
+    """
+    stmt = select(OrdenPedido).where(OrdenPedido.id == orden_id)
+    if bloquear:
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
     orden = await db.scalar(stmt)
-    if orden is None:
+    if orden is None or not _puede_ver(actor, orden):
         raise orden_no_encontrada()
     return orden
+
+
+async def respuestas_de_ordenes(
+    db: AsyncSession, actor: Usuario, ordenes: Sequence[OrdenPedido]
+) -> list[OrdenPedidoResponse]:
+    """Arma las respuestas; para administradores suma el resumen del solicitante.
+
+    Una sola consulta a ``users.datos_publicos_por_ids`` para todas las órdenes (P6:
+    solo ``id``, ``nombre`` y ``apellido``). El dueño recibe ``solicitante = null``.
+    """
+    respuestas = [OrdenPedidoResponse.model_validate(o) for o in ordenes]
+    if not _es_admin(actor) or not respuestas:
+        return respuestas
+    datos = await datos_publicos_por_ids(db, [r.solicitante_id for r in respuestas])
+    return [
+        r.model_copy(
+            update={"solicitante": SolicitanteResumen.model_validate(datos[r.solicitante_id])}
+        )
+        if r.solicitante_id in datos
+        else r
+        for r in respuestas
+    ]
+
+
+async def obtener_orden(db: AsyncSession, actor: Usuario, orden_id: int) -> OrdenPedidoResponse:
+    """Detalle de una orden para el dueño o un administrador con jurisdicción; si no, 404."""
+    orden = await _orden_con_alcance(db, actor, orden_id)
+    return (await respuestas_de_ordenes(db, actor, [orden]))[0]
 
 
 # ── Validaciones puras (sin base de datos) ───────────────────────────────────
@@ -325,7 +382,10 @@ async def crear_orden(db: AsyncSession, actor: Usuario, payload: OrdenPedidoCrea
             422, "ASIGNATURA_REQUERIDA", "Indicá la asignatura para la que pedís el equipo."
         )
     sede = actor.sede
-    assert sede is not None, "Solo estudiantes y docentes crean órdenes, y tienen sede"
+    if sede is None:  # no debería pasar: el CHECK sede_segun_rol de usuarios lo impide
+        raise AppError(
+            403, "ROL_NO_AUTORIZADO", "Tu cuenta no tiene una sede asignada para pedir equipos."
+        )
     retiro, devolucion = payload.retiro, payload.devolucion
 
     # 2. Parámetros (RN-L28). Horario global hasta que config publique el de cada sede (K10).

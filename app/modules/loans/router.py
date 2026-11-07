@@ -131,8 +131,12 @@ async def obtener_orden(
     orden_id: int,
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> OrdenPedido:
-    """Hoy solo lo ve el dueño; sede y docente se agregan en las fases 2 y 4."""
+) -> OrdenPedidoResponse:
+    """Lo ven el dueño y los administradores con jurisdicción sobre la sede de la orden.
+
+    Para los administradores incluye nombre y apellido del solicitante (P6). Fuera de
+    alcance responde 404, nunca 403. El docente de la asignatura llega en la Fase 4.
+    """
     return await service.obtener_orden(db, actor, orden_id)
 
 
