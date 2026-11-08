@@ -30,6 +30,7 @@ from app.modules.loans.enums import (
 )
 from app.modules.loans.models import DetallePrestamo, OrdenHistorialEstado, OrdenPedido
 from app.modules.loans.schemas import (
+    LineaUnidadesLibresResponse,
     OrdenPedidoCreate,
     OrdenPedidoEstadoUpdate,
     OrdenPedidoResponse,
@@ -451,6 +452,35 @@ async def unidades_libres(
     """
     libres = await ids_unidades_libres(db, equipamiento_ids, sede, desde, hasta)
     return {m: len(ids) for m, ids in libres.items()}
+
+
+async def unidades_libres_de_orden(
+    db: AsyncSession, actor: Usuario, orden_id: int
+) -> list[LineaUnidadesLibresResponse]:
+    """Por cada línea de la orden, las unidades que se le pueden asignar (RN-L12, AC-L58).
+
+    Mismo criterio que ``ids_unidades_libres``: del modelo de la línea, en la sede de la
+    orden, ``disponible`` y sin otra línea ocupante que se solape con su período. Una
+    reserva en otras fechas no la excluye (AC-L47). Fuera de alcance, 404 (RN-L26).
+    Las líneas de una orden comparten el período, así que alcanza con una llamada; se
+    agrupa por período por si una línea quedara con otro.
+    """
+    orden = await _orden_con_alcance(db, actor, orden_id)
+    por_periodo: dict[tuple[datetime, datetime], list[DetallePrestamo]] = {}
+    for detalle in orden.detalles:
+        periodo = (detalle.retiro_pactado, detalle.fin_ocupacion)
+        por_periodo.setdefault(periodo, []).append(detalle)
+    libres: dict[int, list[int]] = {}  # detalle_id → ids de unidades
+    for (desde, hasta), detalles in por_periodo.items():
+        modelos = [d.equipamiento_id for d in detalles]
+        por_modelo = await ids_unidades_libres(db, modelos, orden.sede, desde, hasta)
+        libres |= {d.id: por_modelo[d.equipamiento_id] for d in detalles}
+    return [
+        LineaUnidadesLibresResponse(
+            detalle_id=d.id, equipamiento_id=d.equipamiento_id, unidades=libres[d.id]
+        )
+        for d in orden.detalles
+    ]
 
 
 # ── Ocupación por unidad (API pública para inventory, PRE-01) ────────────────

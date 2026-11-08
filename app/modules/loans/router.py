@@ -23,6 +23,7 @@ from app.modules.loans import service
 from app.modules.loans.enums import EstadoOrdenEnum
 from app.modules.loans.models import OrdenPedido
 from app.modules.loans.schemas import (
+    LineaUnidadesLibresResponse,
     OrdenPedidoCreate,
     OrdenPedidoEstadoUpdate,
     OrdenPedidoResponse,
@@ -137,6 +138,26 @@ async def obtener_orden(
     alcance responde 404, nunca 403. El docente de la asignatura llega en la Fase 4.
     """
     return await service.obtener_orden(db, actor, orden_id)
+
+
+@router.get(
+    "/ordenes/{orden_id}/unidades-libres",
+    response_model=list[LineaUnidadesLibresResponse],
+    summary="Unidades libres por línea, para asignar al aprobar",
+    responses=error_responses(401, 403, 404),
+)
+async def unidades_libres_de_orden(
+    orden_id: int,
+    actor: Usuario = Depends(_solo_admins),
+    db: AsyncSession = Depends(get_db),
+) -> list[LineaUnidadesLibresResponse]:
+    """Por cada línea, las unidades del modelo en la sede de la orden que están
+    ``disponible`` y sin otra reserva que se solape con su período (PRE-10, RN-L12).
+
+    Devuelve solo ids; el código de inventario sale del stock de ``inventory``. Fuera
+    de la jurisdicción del administrador responde 404.
+    """
+    return await service.unidades_libres_de_orden(db, actor, orden_id)
 
 
 @router.patch(

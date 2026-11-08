@@ -32,6 +32,7 @@ RUTAS = [
     ("GET", "/ordenes", None),
     ("GET", "/ordenes/1", None),
     ("PATCH", "/ordenes/1/estado", RECHAZO),
+    ("GET", "/ordenes/1/unidades-libres", None),
 ]
 
 # (rol, método, ruta, cuerpo) sin permiso según la matriz del spec §4
@@ -90,5 +91,6 @@ async def test_openapi_publica_las_rutas_del_spec(client):
     assert set(paths[f"{BASE}/ordenes/mias"]) == {"get"}
     assert set(paths[f"{BASE}/ordenes/{{orden_id}}"]) == {"get"}
     assert set(paths[f"{BASE}/ordenes/{{orden_id}}/estado"]) == {"patch"}
+    assert set(paths[f"{BASE}/ordenes/{{orden_id}}/unidades-libres"]) == {"get"}
     assert f"{BASE}/ordenes/{{orden_id}}/resolucion" not in paths
     assert f"{BASE}/ordenes/{{orden_id}}/cancelacion" not in paths

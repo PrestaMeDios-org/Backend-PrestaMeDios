@@ -193,6 +193,21 @@ class OrdenPedidoResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Bandeja administrativa
 # ---------------------------------------------------------------------------
+class LineaUnidadesLibresResponse(BaseModel):
+    """Unidades que se pueden asignar a una línea al aprobar (RN-L10, RN-L12, AC-L58).
+
+    Solo ids: para mostrar el código de inventario, la interfaz los cruza con el stock
+    de `inventory` (plan §8.7, Q1).
+    """
+
+    detalle_id: int = Field(examples=[31])
+    equipamiento_id: int = Field(examples=[12])
+    unidades: list[int] = Field(
+        description="Ids de las unidades libres para el período de la línea.",
+        examples=[[101, 104]],
+    )
+
+
 class AsignacionUnidad(BaseModel):
     """El administrador asigna una unidad física concreta a una línea."""
 
