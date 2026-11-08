@@ -134,7 +134,8 @@ def test_datos_publicos_solo_tiene_id_nombre_y_apellido_e_inmutable():
     datos = DatosPublicosUsuario(id=1, nombre="Ana", apellido="Núñez")
     with pytest.raises(dataclasses.FrozenInstanceError):
         datos.nombre = "Otra"  # type: ignore[misc]
-    with pytest.raises(dataclasses.FrozenInstanceError):
+    # DT-30: con slots=True, 3.12 y 3.13 lanzan TypeError al agregar un atributo; 3.14, FrozenInstanceError.
+    with pytest.raises((dataclasses.FrozenInstanceError, TypeError, AttributeError)):
         datos.dni = "30111222"  # type: ignore[attr-defined]
     assert not hasattr(datos, "__dict__")
 
