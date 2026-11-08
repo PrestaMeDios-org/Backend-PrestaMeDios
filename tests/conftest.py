@@ -38,6 +38,7 @@ from app.modules.config.models import ParametroGlobal  # noqa: E402
 from app.modules.config.seed import PARAMETROS_SEMILLA  # noqa: E402
 from app.modules.inventory import models as _inventory_models  # noqa: E402, F401
 from app.modules.loans import models as _loans_models  # noqa: E402, F401
+from app.modules.notifications import models as _notifications_models  # noqa: E402, F401
 from app.modules.spaces import models as _spaces_models  # noqa: E402, F401
 from app.modules.users.models import Usuario  # noqa: E402
 
@@ -50,6 +51,7 @@ TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 PASSWORD = "Camara2026!"
 
 _TABLAS = (
+    "notificaciones, comunicados, "  # SPEC-06 (conformidad del Perfil 1, T-01)
     "parametros_globales_historial, parametros_globales, usuarios_historial_estado, "
     "reservas_espacios, bloqueos_espacios, espacios, ordenes_historial_estado, "
     "detalles_prestamo, ordenes_pedido, "
