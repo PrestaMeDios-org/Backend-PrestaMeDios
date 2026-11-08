@@ -262,13 +262,13 @@ class TestConfirmar:
         ganadora = "PrimeraClave2026" if r1.status_code == 200 else "SegundaClave2026"
         assert await _login(client, "lucia@untdf.edu.ar", ganadora) == 200
 
-    @pytest.mark.parametrize("password", ["corta1", "solamenteletras", "lucia@untdf.edu.ar"])
+    @pytest.mark.parametrize("password", ["corta1", "solamenteletras", "Lucia2026@untdf.edu.ar"])
     async def test_password_invalida_no_consume_el_token(
         self, client, db, crear_usuario, correos, password
-    ):  # AC-77
-        u = await crear_usuario(email="lucia@untdf.edu.ar")
+    ):  # AC-77 (la última es el email de la cuenta: la rechaza el servicio, no Pydantic)
+        u = await crear_usuario(email="lucia2026@untdf.edu.ar")
         uid = u.id
-        token = await _token_para(client, correos, "lucia@untdf.edu.ar")
+        token = await _token_para(client, correos, "lucia2026@untdf.edu.ar")
         r = await _confirmar(client, token, password)
         assert r.status_code == 422
         assert isinstance(r.json()["detail"], list)  # validación estándar (RN-03)
