@@ -54,7 +54,14 @@ def transicion_invalida(desde: EstadoUnidadEnum, hacia: EstadoUnidadEnum) -> App
 
 
 async def bloquear_unidad(db: AsyncSession, unidad_id: int) -> UnidadFisica | None:
-    """Lee la unidad con ``SELECT ... FOR UPDATE`` para serializar cambios (RN-I8)."""
+    """API pública (C14): lee la unidad con ``SELECT ... FOR UPDATE`` para serializar cambios (RN-I8).
+
+    Devuelve la unidad o ``None`` si no existe; no filtra por sede ni estado y no
+    hace ``commit``. Quien llama puede leer ``id``, ``equipamiento_id``, ``sede``
+    y ``estado``; no asigna atributos (los cambios pasan por las funciones de
+    cambio de estado). Para bloquear varias unidades en una transacción, hacerlo
+    en orden ascendente de id para evitar interbloqueos (RN-L11 de SPEC-05).
+    """
     stmt = (
         select(UnidadFisica)
         .where(UnidadFisica.id == unidad_id)
@@ -121,6 +128,24 @@ async def liberar_unidad(db: AsyncSession, unidad_id: int) -> UnidadFisica:
     if unidad.estado is not E.PRESTADO:
         raise transicion_invalida(unidad.estado, E.DISPONIBLE)
     unidad.estado = E.DISPONIBLE
+    return unidad
+
+
+async def marcar_unidad_mantenimiento(db: AsyncSession, unidad_id: int) -> UnidadFisica:
+    """Mantenimiento (PRE-14, C17 de SPEC-05): ``disponible`` → ``mantenimiento``.
+
+    Función pública para `loans` y otros módulos: pone una unidad en mantenimiento
+    sin pasar por el router. Idempotente si ya está en `mantenimiento`; desde
+    `prestado` o `baja` responde `409 TRANSICION_ESTADO_INVALIDA`. No hace
+    ``commit`` ni ``flush``: la transacción es de quien llama.
+    """
+    unidad = await bloquear_unidad(db, unidad_id)
+    if unidad is None:
+        raise unidad_no_encontrada()
+    if unidad.estado is E.MANTENIMIENTO:
+        return unidad
+    validar_transicion_admin(unidad.estado, E.MANTENIMIENTO)
+    unidad.estado = E.MANTENIMIENTO
     return unidad
 
 

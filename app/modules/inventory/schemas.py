@@ -5,6 +5,7 @@
 """
 
 from collections.abc import Sequence
+from datetime import date
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
@@ -214,3 +215,19 @@ class EquipamientoPublicoResponse(EquipamientoBase):
             cantidad_disponible=disponibles,
             en_mantenimiento=en_mant,
         )
+
+class DiaDisponibilidad(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    fecha: date = Field(..., examples=["2026-11-10"])
+    unidades_libres: int = Field(..., ge=0, examples=[2])
+    disponible: bool = Field(..., examples=[True])
+
+
+class DisponibilidadResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    equipamiento_id: int = Field(..., examples=[12])
+    sede: SedeEnum = Field(..., examples=["Ushuaia"])
+    desde: date = Field(..., examples=["2026-11-09"])
+    hasta: date = Field(..., examples=["2026-11-30"])
+    unidades_asignables: int = Field(..., ge=0, examples=[3])
+    dias: list[DiaDisponibilidad]
