@@ -7,6 +7,9 @@ importar este módulo ni `loans`, porque `loans/service.py` importa `inventory/s
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.enums import SedeEnum
 from app.core.errors import AppError
 from app.core.settings import ZONA_HORARIA_LAB
 from app.modules.inventory.service import unidades_asignables
@@ -27,7 +30,7 @@ def validar_rango(desde: date, hasta: date, hoy: date) -> None:
     if desde < hoy:
         raise AppError(422, "RANGO_FECHAS_INVALIDO", "El rango no puede empezar antes de hoy.")
     if (hasta - desde).days + 1 > MAX_DIAS_DISPONIBILIDAD:
-        raise AppError(422, "RANGO_FECHAS_INVALIDO", "Como máximo 62 días.")
+        raise AppError(422, "RANGO_FECHAS_INVALIDO", f"Como máximo {MAX_DIAS_DISPONIBILIDAD} días.")
 
 
 def contar_libres_por_dia(
@@ -47,7 +50,9 @@ def contar_libres_por_dia(
     return dias
 
 
-async def disponibilidad_por_dia(db, equipamiento_id, sede, desde, hasta):
+async def disponibilidad_por_dia(
+    db: AsyncSession, equipamiento_id: int, sede: SedeEnum, desde: date, hasta: date
+) -> tuple[int, list[tuple[date, int]]]:
     """RN-I14: unidades asignables hoy menos las ocupadas, por día."""
     ids = await unidades_asignables(db, equipamiento_id, sede)
     ocupacion = await ocupacion_de_unidades(

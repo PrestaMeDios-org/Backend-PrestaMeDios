@@ -9,6 +9,7 @@
 """
 
 from datetime import date
+
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -25,16 +26,12 @@ from app.core.deps import (
 )
 from app.core.enums import ROLES_ADMIN, RolUsuario
 from app.core.errors import AppError, error_responses
+from app.core.settings import ahora_lab
 from app.database import get_db
 from app.modules.config.service import obtener_parametro
+from app.modules.inventory.disponibilidad import disponibilidad_por_dia, validar_rango
 from app.modules.inventory.enums import EstadoUnidadEnum, SedeEnum
 from app.modules.inventory.models import Categoria, Equipamiento, UnidadFisica
-from app.core.settings import ahora_lab
-from app.modules.inventory.disponibilidad import (
-    MAX_DIAS_DISPONIBILIDAD,
-    disponibilidad_por_dia,
-    validar_rango,
-)
 from app.modules.inventory.schemas import (
     CategoriaCreate,
     CategoriaResponse,
