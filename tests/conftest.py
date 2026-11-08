@@ -36,6 +36,7 @@ from app.main import app  # noqa: E402
 from app.modules.config import models as _config_models  # noqa: E402, F401
 from app.modules.config.models import ParametroGlobal  # noqa: E402
 from app.modules.config.seed import PARAMETROS_SEMILLA  # noqa: E402
+from app.modules.files import models as _files_models  # noqa: E402, F401
 from app.modules.inventory import models as _inventory_models  # noqa: E402, F401
 from app.modules.loans import models as _loans_models  # noqa: E402, F401
 from app.modules.notifications import models as _notifications_models  # noqa: E402, F401

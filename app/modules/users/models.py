@@ -1,9 +1,10 @@
 """Modelos ORM del módulo `users` (SPEC-01 §4.2, §4.3).
 
-Tablas: ``usuarios`` y ``usuarios_historial_estado``. No hay borrado físico
+Tablas: ``usuarios``, ``usuarios_historial_estado`` y ``usuarios_historial_cambios``. No hay borrado físico
 de usuarios: la baja es lógica (``INACTIVO``, RN-17).
 """
 
+import uuid
 from datetime import datetime
 
 from sqlalchemy import (
@@ -22,10 +23,14 @@ from sqlalchemy import (
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum, enum_values
 from app.database import Base
+
+# Registra `archivos` en la metadata: `usuarios.foto_id` la referencia (SPEC-03 §6.2).
+from app.modules.files import models as _files_models  # noqa: E402, F401
 
 ROL_USUARIO_ENUM = SAEnum(RolUsuario, values_callable=enum_values, name="rol_usuario_enum")
 ESTADO_CUENTA_ENUM = SAEnum(EstadoCuenta, values_callable=enum_values, name="estado_cuenta_enum")
@@ -78,6 +83,11 @@ class Usuario(Base):
         ForeignKey("usuarios.id", ondelete="SET NULL")
     )
     aprobado_en: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Foto vigente (USR-03). `use_alter`: ciclo con `archivos.propietario_id`.
+    foto_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("archivos.id", ondelete="SET NULL", use_alter=True),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
