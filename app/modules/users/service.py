@@ -491,6 +491,8 @@ async def actualizar_perfil(db: AsyncSession, usuario: Usuario, datos: PerfilUpd
         _aplicar(usuario, "email", datos.email, cambios)
     if "telefono" in datos.model_fields_set:
         _aplicar(usuario, "telefono", datos.telefono, cambios)
+    if "email" in cambios:  # SPEC-03 RN-53: el enlace se mandó a la dirección anterior
+        await _invalidar_tokens_recuperacion(db, usuario.id)
 
     _registrar_cambios(db, usuario, cambios, actor_id=usuario.id)
     await _persistir(db, commit=True)
@@ -598,6 +600,8 @@ async def editar_por_admin(
         revoca = True
     if revoca:
         objetivo.token_version += 1  # RN-08
+    if "email" in cambios:  # SPEC-03 RN-53
+        await _invalidar_tokens_recuperacion(db, objetivo.id)
 
     _registrar_cambios(db, objetivo, cambios, actor_id=actor.id)
     await _persistir(db, commit=True)

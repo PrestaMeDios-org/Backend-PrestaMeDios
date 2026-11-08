@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select, update
 
-from app.core.enums import EstadoCuenta
+from app.core.enums import EstadoCuenta, RolUsuario
 from app.core.settings import get_settings
 from app.modules.users.models import (
     IntentoRecuperacion,
@@ -281,4 +281,62 @@ class TestConfirmar:
             CONFIRMAR, json={"token": "x" * 43, "password_nueva": NUEVA, "usuario_id": 1}
         )
         assert r.status_code == 422
+
+
+class TestInvalidaciones:  # AC-75, RN-48, RN-53
+    async def test_un_pedido_nuevo_invalida_el_anterior(self, client, crear_usuario, correos):
+        await crear_usuario(email="lucia@untdf.edu.ar")
+        viejo = await _token_para(client, correos, "lucia@untdf.edu.ar")
+        nuevo = await _token_para(client, correos, "lucia@untdf.edu.ar")
+        r = await _confirmar(client, viejo)
+        assert r.status_code == 422 and r.json()["code"] == "TOKEN_RECUPERACION_INVALIDO"
+        assert (await _confirmar(client, nuevo)).status_code == 200
+
+    async def test_restablecer_invalida_los_demas(self, client, db, crear_usuario, correos):
+        u = await crear_usuario(email="lucia@untdf.edu.ar")
+        uid = u.id
+        token = await _token_para(client, correos, "lucia@untdf.edu.ar")
+        # Un token pendiente creado por fuera del flujo (p. ej., en carrera con el pedido).
+        db.add(
+            TokenRecuperacion(
+                usuario_id=uid,
+                token_hash=hashlib.sha256(b"otro").hexdigest(),
+                expira_en=datetime.now(UTC) + timedelta(minutes=30),
+            )
+        )
+        await db.commit()
+        assert (await _confirmar(client, token)).status_code == 200
+        assert all(t.usado_en is not None for t in await _tokens(db, uid))
+
+    async def test_cambiar_el_email_propio(self, client, crear_usuario, correos):
+        u = await crear_usuario(email="lucia@untdf.edu.ar")
+        token = await _token_para(client, correos, "lucia@untdf.edu.ar")
+        r = await client.patch(
+            "/api/v1/auth/me",
+            json={"email": "lucia@gmail.com", "password_actual": PASSWORD},
+            headers=auth(u),
+        )
+        assert r.status_code == 200, r.text
+        r = await _confirmar(client, token)
+        assert r.status_code == 422 and r.json()["code"] == "TOKEN_RECUPERACION_INVALIDO"
+
+    async def test_cambiar_solo_el_telefono_no_invalida(self, client, crear_usuario, correos):
+        u = await crear_usuario(email="lucia@untdf.edu.ar")
+        token = await _token_para(client, correos, "lucia@untdf.edu.ar")
+        r = await client.patch(
+            "/api/v1/auth/me", json={"telefono": "+54 2901 555123"}, headers=auth(u)
+        )
+        assert r.status_code == 200
+        assert (await _confirmar(client, token)).status_code == 200
+
+    async def test_un_admin_cambia_el_email(self, client, crear_usuario, correos):
+        u = await crear_usuario(RolUsuario.ESTUDIANTE, email="lucia@untdf.edu.ar")
+        admin = await crear_usuario(RolUsuario.ADMIN_LOCAL)
+        token = await _token_para(client, correos, "lucia@untdf.edu.ar")
+        r = await client.patch(
+            f"/api/v1/users/{u.id}", json={"email": "lucia@gmail.com"}, headers=auth(admin)
+        )
+        assert r.status_code == 200, r.text
+        r = await _confirmar(client, token)
+        assert r.status_code == 422 and r.json()["code"] == "TOKEN_RECUPERACION_INVALIDO"
 
