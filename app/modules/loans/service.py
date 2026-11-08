@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import puede_ver_sede, resolver_alcance_sede
@@ -22,7 +23,12 @@ from app.core.enums import RolUsuario, SedeEnum
 from app.core.errors import AppError
 from app.core.settings import ZONA_HORARIA_LAB, ahora_lab
 from app.modules.config.service import obtener_parametro
-from app.modules.inventory.service import datos_equipamiento_por_ids, unidades_asignables
+from app.modules.inventory.service import (
+    bloquear_unidad,
+    datos_equipamiento_por_ids,
+    unidad_es_asignable,
+    unidades_asignables,
+)
 from app.modules.loans.enums import (
     ESTADOS_DETALLE_QUE_OCUPAN,
     EstadoDetalleEnum,
@@ -227,6 +233,90 @@ def _resolver(
     return historial
 
 
+_SQLSTATE_EXCLUSION = "23P01"
+
+
+def _es_solapamiento(exc: IntegrityError) -> bool:
+    """¿La base rechazó la escritura por el ``EXCLUDE`` (SQLSTATE ``23P01``)?"""
+    orig = exc.orig
+    return _SQLSTATE_EXCLUSION in (getattr(orig, "sqlstate", None), getattr(orig, "pgcode", None))
+
+
+def _asignaciones_invalidas(detalle: str) -> AppError:
+    return AppError(422, "ASIGNACIONES_INVALIDAS", detalle)
+
+
+def _unidad_no_asignable(detalle_id: int, unidad_id: int) -> AppError:
+    return AppError(
+        422,
+        "UNIDAD_NO_ASIGNABLE",
+        "La unidad elegida no se puede asignar a esa línea: no está disponible, "
+        "es de otra sede o de otro equipo.",
+        detalle_id=detalle_id,
+        unidad_fisica_id=unidad_id,
+    )
+
+
+async def _aprobar(
+    db: AsyncSession, orden: OrdenPedido, actor: Usuario, payload: OrdenPedidoEstadoUpdate
+) -> OrdenHistorialEstado:
+    """Aprobación de una orden ``pendiente`` ya bloqueada (RN-L11…L13, RN-L27, plan §8.5.5).
+
+    1. Sin ajuste horario, el retiro tiene que ser futuro (``422 RETIRO_VENCIDO``). No se
+       revalidan plazos ni franja (EC-L11). El ajuste horario (T2.10) todavía responde 501.
+    2. Exactamente una asignación por línea, sin líneas ajenas ni unidades repetidas
+       (``422 ASIGNACIONES_INVALIDAS``, AC-L22).
+    3. Cada unidad se bloquea en orden ascendente de id (RN-L14) y tiene que ser del
+       modelo de la línea, de la sede de la orden, ``disponible`` y de un ítem activo
+       (``422 UNIDAD_NO_ASIGNABLE``, AC-L20, L21, L26; EC-L08). ``loans`` solo lee la
+       unidad: su estado es de ``inventory`` (DT-20).
+    4. Líneas ``reservado`` con su unidad. El solapamiento con otra reserva lo rechaza la
+       base al hacer ``commit`` (``409 UNIDAD_NO_DISPONIBLE``, lo traduce quien llama).
+    """
+    # 1. Retiro vencido (RN-L27, AC-L30).
+    if payload.nuevo_retiro is not None:
+        raise AppError(501, "NO_IMPLEMENTADO", "El ajuste horario todavía no está disponible.")
+    retiro = min((d.retiro_pactado for d in orden.detalles), default=None)
+    if retiro is not None and retiro <= ahora_lab():
+        raise AppError(
+            422,
+            "RETIRO_VENCIDO",
+            "La fecha de retiro ya pasó: rechazá la orden o aprobala ajustando el horario.",
+        )
+
+    # 2. Asignaciones (RN-L11, AC-L22). El esquema ya rechaza dos para la misma línea.
+    lineas = {d.id: d for d in orden.detalles}
+    unidad_de = {a.detalle_id: a.unidad_fisica_id for a in payload.asignaciones}
+    if set(unidad_de) - set(lineas):
+        raise _asignaciones_invalidas("Hay asignaciones para líneas que no son de esta orden.")
+    if set(lineas) - set(unidad_de):
+        raise _asignaciones_invalidas("Asigná una unidad a cada línea de la orden.")
+    if len(set(unidad_de.values())) != len(unidad_de):
+        raise _asignaciones_invalidas("No se puede asignar la misma unidad a dos líneas.")
+
+    # 3. Unidades, bloqueadas en orden ascendente de id (RN-L14).
+    for detalle_id, unidad_id in sorted(unidad_de.items(), key=lambda par: par[1]):
+        unidad = await bloquear_unidad(db, unidad_id)
+        if (
+            unidad is None
+            or unidad.equipamiento_id != lineas[detalle_id].equipamiento_id
+            or not await unidad_es_asignable(db, unidad_id, orden.sede)
+        ):
+            raise _unidad_no_asignable(detalle_id, unidad_id)
+
+    # 4. Aplicar (AC-L19).
+    for detalle_id, unidad_id in unidad_de.items():
+        lineas[detalle_id].unidad_fisica_id = unidad_id
+    return _resolver(
+        orden,
+        actor,
+        EstadoOrdenEnum.APROBADA,
+        EstadoDetalleEnum.RESERVADO,
+        payload.motivo,
+        lineas_desde=(EstadoDetalleEnum.PENDIENTE,),
+    )
+
+
 async def cambiar_estado_orden(
     db: AsyncSession, actor: Usuario, orden_id: int, payload: OrdenPedidoEstadoUpdate
 ) -> OrdenPedidoResponse:
@@ -240,8 +330,11 @@ async def cambiar_estado_orden(
     - ``rechazada``: administrador con jurisdicción, orden ``pendiente``, con motivo.
     - ``cancelada`` por el dueño: solo su orden ``pendiente``; motivo opcional. Si está
       ``aprobada``, ``403 CANCELACION_NO_PERMITIDA`` (AC-L32).
-    - ``aprobada`` (T2.7) y la cancelación de una ``aprobada`` por el administrador
-      (T2.9) todavía responden ``501``.
+    - ``aprobada``: administrador con jurisdicción, orden ``pendiente``, una unidad por
+      línea (``_aprobar``). Un solapamiento que rechaza la base responde
+      ``409 UNIDAD_NO_DISPONIBLE`` sin cambios parciales (RN-L13).
+    - El ajuste horario (T2.10) y la cancelación de una ``aprobada`` por el
+      administrador (T2.9) todavía responden ``501``.
     """
     pedido = payload.estado
     # 1. Aprobar y rechazar son administrativos, sea o no el dueño (AC-L29).
@@ -258,9 +351,9 @@ async def cambiar_estado_orden(
         if pedido is EstadoOrdenEnum.APROBADA:
             if actual is not EstadoOrdenEnum.PENDIENTE:
                 raise transicion_invalida(orden)
-            raise AppError(501, "NO_IMPLEMENTADO", "La aprobación todavía no está disponible.")
+            historial = await _aprobar(db, orden, actor, payload)
 
-        if pedido is EstadoOrdenEnum.RECHAZADA:
+        elif pedido is EstadoOrdenEnum.RECHAZADA:
             # 3. Solo se rechaza una pendiente (AC-L28); 4. con motivo (AC-L27).
             if actual is not EstadoOrdenEnum.PENDIENTE:
                 raise transicion_invalida(orden)
@@ -298,9 +391,18 @@ async def cambiar_estado_orden(
                 501, "NO_IMPLEMENTADO", "Cancelar una orden aprobada todavía no está disponible."
             )
 
-        # 5. Aplicar en una sola transacción.
+        # 5. Aplicar en una sola transacción: todo o nada (RN-L13).
         db.add(historial)
         await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if _es_solapamiento(exc):  # el EXCLUDE de 0009 (RN-L12, AC-L23, AC-L47)
+            raise AppError(
+                409,
+                "UNIDAD_NO_DISPONIBLE",
+                "Alguna de las unidades ya está reservada en fechas que se superponen.",
+            ) from exc
+        raise  # CHECK, unicidad o FK no se enmascaran como conflicto (AC-L53)
     except Exception:
         await db.rollback()
         raise

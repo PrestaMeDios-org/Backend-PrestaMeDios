@@ -3,8 +3,8 @@
 `PATCH /ordenes/{id}/estado`: el administrador con jurisdicción rechaza una orden
 `pendiente` con motivo; el solicitante cancela su orden `pendiente`. Cada transición
 deja la resolución (`resuelto_por_id`, `resuelto_en`) y una fila en
-`ordenes_historial_estado` (D-L10). Aprobar (T2.7) y la cancelación de una `aprobada`
-por el administrador (T2.9) todavía responden 501.
+`ordenes_historial_estado` (D-L10). La cancelación de una `aprobada` por el
+administrador (T2.9) todavía responde 501. Aprobar se prueba en `test_aprobar.py`.
 """
 
 from datetime import datetime, timedelta
@@ -326,20 +326,7 @@ async def test_el_admin_no_cancela_una_pendiente(client, db, crear_usuario, crea
     await _sin_cambios(db, orden_id, P)
 
 
-# ── Pendientes de T2.7 y T2.9 ────────────────────────────────────────────────
-
-
-async def test_aprobar_todavia_responde_501(client, db, crear_usuario, crear_orden):
-    # Se reemplaza en T2.7 (test_aprobar.py)
-    ana = await crear_usuario(E, USH)
-    orden_id = await crear_orden(ana)
-    admin = await crear_usuario(A, USH)
-
-    r = await _patch(client, admin, orden_id, APROBACION)
-
-    assert r.status_code == 501
-    assert r.json()["code"] == "NO_IMPLEMENTADO"
-    await _sin_cambios(db, orden_id, P)
+# ── Pendiente de T2.9 ────────────────────────────────────────────────
 
 
 async def test_el_admin_cancela_una_aprobada_todavia_responde_501(client, db, crear_usuario):
