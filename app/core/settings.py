@@ -6,6 +6,7 @@ parámetros globales (RN-23).
 
 from datetime import datetime
 from functools import lru_cache
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from pydantic import Field
@@ -45,6 +46,29 @@ class Settings(BaseSettings):
         default=24, ge=1, le=24 * 30, alias="ARCHIVO_HUERFANO_HORAS"
     )
     archivo_max_pendientes: int = Field(default=5, ge=1, le=50, alias="ARCHIVO_MAX_PENDIENTES")
+
+    # Correo (SPEC-03 §5.1). Secretos sólo en `.env` (NFR-03).
+    email_backend: Literal["smtp", "memoria"] = Field(default="smtp", alias="EMAIL_BACKEND")
+    smtp_host: str = Field(default="localhost", alias="SMTP_HOST")
+    smtp_port: int = Field(default=1025, ge=1, le=65535, alias="SMTP_PORT")
+    smtp_user: str = Field(default="", alias="SMTP_USER")
+    smtp_password: str = Field(default="", alias="SMTP_PASSWORD", repr=False)
+    smtp_tls: Literal["starttls", "ssl", "ninguno"] = Field(default="starttls", alias="SMTP_TLS")
+    email_from: str = Field(
+        default="PrestaMeDios <no-responder@localhost>", alias="EMAIL_FROM"
+    )
+    frontend_url: str = Field(default="http://localhost:8443", alias="FRONTEND_URL")
+
+    # Recuperación de contraseña (SPEC-03 §5.2, D-07): seguridad técnica, no GLO-03.
+    recuperacion_vigencia_minutos: int = Field(
+        default=30, ge=5, le=24 * 60, alias="RECUPERACION_VIGENCIA_MINUTOS"
+    )
+    recuperacion_max_por_email_hora: int = Field(
+        default=3, ge=1, le=100, alias="RECUPERACION_MAX_POR_EMAIL_HORA"
+    )
+    recuperacion_max_por_ip_hora: int = Field(
+        default=20, ge=1, le=1000, alias="RECUPERACION_MAX_POR_IP_HORA"
+    )
 
     @property
     def cors_origins_list(self) -> list[str]:
