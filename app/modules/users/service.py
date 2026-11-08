@@ -4,19 +4,24 @@ Los servicios no conocen HTTP salvo ``AppError``; los routers sólo validan
 contrato y permisos y delegan aquí.
 """
 
+import hashlib
+import hmac
+import logging
+import secrets
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import UploadFile
-from sqlalchemy import Integer, Select, any_, bindparam, func, or_, select
+from sqlalchemy import Integer, Select, any_, bindparam, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import permiso_insuficiente, resolver_alcance_sede
 from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum
+from app.core.email import ErrorEnvioCorreo, TipoCorreo, enviar_correo
 from app.core.errors import AppError
 from app.core.security import (
     crear_access_token,
@@ -26,7 +31,14 @@ from app.core.security import (
 )
 from app.modules.files import service as files
 from app.modules.files.enums import PropositoArchivo
-from app.modules.users.models import Usuario, UsuarioHistorialCambios, UsuarioHistorialEstado
+from app.core.settings import get_settings
+from app.modules.users.models import (
+    IntentoRecuperacion,
+    TokenRecuperacion,
+    Usuario,
+    UsuarioHistorialCambios,
+    UsuarioHistorialEstado,
+)
 from app.modules.users.schemas import (
     CambioEstadoRequest,
     CambioPasswordRequest,
@@ -37,6 +49,8 @@ from app.modules.users.schemas import (
 )
 
 E = EstadoCuenta
+
+logger = logging.getLogger(__name__)
 
 # (desde, hacia) → ¿incrementa token_version? (SPEC-01 §3.2). Lo no listado es inválido.
 TRANSICIONES: dict[tuple[EstadoCuenta, EstadoCuenta], bool] = {
@@ -668,6 +682,129 @@ async def quitar_foto_por_admin(db: AsyncSession, actor: Usuario, usuario_id: in
         await db.rollback()
         raise permiso_insuficiente()
     return await _cambiar_foto(db, objetivo, None, actor_id=actor.id)
+
+
+# ── SPEC-03 · Recuperación de contraseña (USR-02, Fase B1) ───────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class CorreoRecuperacion:
+    """Lo necesario para mandar el enlace después del commit (RN-72). Lleva el token: no
+    se registra en logs ni se devuelve en respuestas (NFR-19)."""
+
+    usuario_id: int
+    destinatario: str
+    nombre: str
+    enlace: str
+    vigencia_minutos: int
+
+
+def _hash_token(token: str) -> str:
+    """RN-46: en la base sólo queda el SHA-256 del token."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _hash_email(email: str) -> str:
+    """RN-49: HMAC del email normalizado. Con un hash simple, un diccionario de emails
+    conocidos lo revertiría."""
+    clave = get_settings().jwt_secret_key.encode()
+    return hmac.new(clave, email.encode(), hashlib.sha256).hexdigest()
+
+
+def _demasiados_intentos() -> AppError:
+    return AppError(
+        429, "DEMASIADOS_INTENTOS", "Hiciste demasiados pedidos. Probá de nuevo más tarde."
+    )
+
+
+async def _invalidar_tokens_recuperacion(db: AsyncSession, usuario_id: int) -> None:
+    """RN-48, RN-53: marca como usados los tokens pendientes de la cuenta. Sin ``commit``."""
+    await db.execute(
+        update(TokenRecuperacion)
+        .where(TokenRecuperacion.usuario_id == usuario_id, TokenRecuperacion.usado_en.is_(None))
+        .values(usado_en=func.now())
+    )
+
+
+async def solicitar_recuperacion(
+    db: AsyncSession, email: str, ip: str
+) -> CorreoRecuperacion | None:
+    """Pedido de enlace de recuperación (USR-02, RN-44…RN-49).
+
+    Devuelve los datos del correo sólo si la cuenta existe y está ``ACTIVO`` (RN-45); si
+    no, ``None``. El router responde lo mismo en ambos casos (RN-44). ``429`` si se pasa
+    el límite por email o por IP en la última hora, exista o no la cuenta (RN-49).
+    """
+    settings = get_settings()
+    await db.execute(
+        delete(IntentoRecuperacion).where(
+            IntentoRecuperacion.created_at < func.now() - timedelta(hours=24)
+        )
+    )
+    email_hash = _hash_email(email)
+    hace_una_hora = func.now() - timedelta(hours=1)
+    por_email = await db.scalar(
+        select(func.count())
+        .select_from(IntentoRecuperacion)
+        .where(
+            IntentoRecuperacion.email_hash == email_hash,
+            IntentoRecuperacion.created_at >= hace_una_hora,
+        )
+    )
+    por_ip = await db.scalar(
+        select(func.count())
+        .select_from(IntentoRecuperacion)
+        .where(IntentoRecuperacion.ip == ip, IntentoRecuperacion.created_at >= hace_una_hora)
+    )
+    if (por_email or 0) >= settings.recuperacion_max_por_email_hora or (
+        por_ip or 0
+    ) >= settings.recuperacion_max_por_ip_hora:
+        await db.commit()  # conserva la limpieza de los intentos viejos
+        raise _demasiados_intentos()
+    db.add(IntentoRecuperacion(email_hash=email_hash, ip=ip))
+
+    usuario = await _buscar_por(db, email=email)
+    pendiente: CorreoRecuperacion | None = None
+    if usuario is not None and usuario.estado == E.ACTIVO:
+        await _invalidar_tokens_recuperacion(db, usuario.id)  # RN-48
+        token = secrets.token_urlsafe(32)  # 256 bits (RN-46)
+        vigencia = settings.recuperacion_vigencia_minutos
+        db.add(
+            TokenRecuperacion(
+                usuario_id=usuario.id,
+                token_hash=_hash_token(token),
+                expira_en=datetime.now(UTC) + timedelta(minutes=vigencia),
+            )
+        )
+        pendiente = CorreoRecuperacion(
+            usuario_id=usuario.id,
+            destinatario=usuario.email,
+            nombre=usuario.nombre,
+            enlace=f"{settings.frontend_url.rstrip('/')}/#/restablecer?token={token}",  # RN-47
+            vigencia_minutos=vigencia,
+        )
+    await db.commit()
+    return pendiente
+
+
+async def enviar_correo_recuperacion(pendiente: CorreoRecuperacion) -> None:
+    """Manda el enlace (se agenda con ``BackgroundTasks``, RN-72). Un fallo del transporte
+    se registra sin el enlace y no cambia la respuesta (RN-73, NFR-19)."""
+    try:
+        await enviar_correo(
+            TipoCorreo.RECUPERACION_PASSWORD,
+            pendiente.destinatario,
+            {
+                "nombre": pendiente.nombre,
+                "enlace": pendiente.enlace,
+                "vigencia_minutos": str(pendiente.vigencia_minutos),
+            },
+            usuario_id=pendiente.usuario_id,
+        )
+    except ErrorEnvioCorreo:
+        logger.warning(
+            "No se pudo enviar el correo de recuperación: usuario_id=%s", pendiente.usuario_id
+        )
 
 
 # ── API pública para otros módulos (SPEC-03 §4, P3.3) ────────────────────────

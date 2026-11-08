@@ -4,7 +4,7 @@
 - ``users_router`` → montado en ``/api/v1/users`` (USR-04, USR-05, GLO-01).
 """
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user_permitiendo_cambio, require_roles
@@ -17,6 +17,9 @@ from app.modules.users.models import Usuario
 from app.modules.users.schemas import (
     CambioEstadoRequest,
     CambioPasswordRequest,
+    MENSAJE_RECUPERACION_NEUTRO,
+    MensajeResponse,
+    SolicitudRecuperacion,
     PerfilUpdate,
     UsuarioAdminUpdate,
     LoginRequest,
@@ -151,6 +154,31 @@ async def quitar_foto(
 ) -> Usuario:
     """Deja ``foto_id = null`` y borra el archivo (USR-03, RN-59)."""
     return await service.quitar_foto(db, usuario)
+
+
+@auth_router.post(
+    "/recuperacion",
+    response_model=MensajeResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Pedir un enlace para restablecer la contraseña",
+    responses=error_responses(422, 429),
+)
+async def solicitar_recuperacion(
+    payload: SolicitudRecuperacion,
+    request: Request,
+    tareas: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> MensajeResponse:
+    """Público (excepción a P4.1). Responde lo mismo exista o no la cuenta (USR-02, RN-44).
+
+    El correo se manda después de responder, para que el tiempo no delate la cuenta
+    (RN-72, NFR-20). Límite por email y por IP en la última hora (RN-49).
+    """
+    ip = request.client.host if request.client else "desconocida"  # RN-54
+    pendiente = await service.solicitar_recuperacion(db, payload.email, ip)
+    if pendiente is not None:
+        tareas.add_task(service.enviar_correo_recuperacion, pendiente)
+    return MensajeResponse(detail=MENSAJE_RECUPERACION_NEUTRO)
 
 
 # ── /users ───────────────────────────────────────────────────────────────────
