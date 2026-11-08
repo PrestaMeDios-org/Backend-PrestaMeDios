@@ -1,9 +1,8 @@
 """Contrato HTTP de `loans` en la Fase 0 (SPEC-05 §14; AC-L52, AC-L53).
 
-Los endpoints exigen sesión y rol. El cambio de estado, que todavía no tiene lógica,
-responde 501 ``NO_IMPLEMENTADO``. Crear orden se prueba en ``test_crear_orden.py`` y la
-bandeja en ``test_bandeja.py``. Estos tests se reemplazan por los de cada criterio a
-medida que se implementa cada fase.
+Los endpoints exigen sesión y rol. Crear orden se prueba en ``test_crear_orden.py``, la
+bandeja en ``test_bandeja.py`` y el rechazo y la cancelación en
+``test_rechazar_cancelar.py``.
 """
 
 import pytest
@@ -35,11 +34,6 @@ RUTAS = [
     ("PATCH", "/ordenes/1/estado", RECHAZO),
 ]
 
-# (rol, método, ruta, cuerpo) con permiso: llegan al placeholder
-PERMITIDAS = [
-    (A, "PATCH", "/ordenes/1/estado", RECHAZO),
-]
-
 # (rol, método, ruta, cuerpo) sin permiso según la matriz del spec §4
 PROHIBIDAS = [
     (A, "POST", "/ordenes", ORDEN),
@@ -48,6 +42,8 @@ PROHIBIDAS = [
     (S, "GET", "/ordenes/mias", None),
     (E, "GET", "/ordenes", None),
     (D, "GET", "/ordenes", None),
+    (E, "PATCH", "/ordenes/1/estado", RECHAZO),  # AC-L29
+    (D, "PATCH", "/ordenes/1/estado", RECHAZO),
 ]
 
 
@@ -62,16 +58,6 @@ async def test_rol_sin_permiso_responde_403(client, crear_usuario, rol, metodo, 
     usuario = await crear_usuario(rol)  # AC-L13, AC-L17
     r = await client.request(metodo, f"{BASE}{ruta}", json=cuerpo, headers=auth(usuario))
     assert r.status_code == 403
-
-
-@pytest.mark.parametrize(("rol", "metodo", "ruta", "cuerpo"), PERMITIDAS)
-async def test_con_permiso_responde_501_no_implementado(
-    client, crear_usuario, rol, metodo, ruta, cuerpo
-):  # AC-L52, AC-L53
-    usuario = await crear_usuario(rol)
-    r = await client.request(metodo, f"{BASE}{ruta}", json=cuerpo, headers=auth(usuario))
-    assert r.status_code == 501
-    assert r.json()["code"] == "NO_IMPLEMENTADO"
 
 
 @pytest.mark.parametrize(

@@ -28,9 +28,10 @@ from app.modules.loans.enums import (
     EstadoDetalleEnum,
     EstadoOrdenEnum,
 )
-from app.modules.loans.models import DetallePrestamo, OrdenPedido
+from app.modules.loans.models import DetallePrestamo, OrdenHistorialEstado, OrdenPedido
 from app.modules.loans.schemas import (
     OrdenPedidoCreate,
+    OrdenPedidoEstadoUpdate,
     OrdenPedidoResponse,
     ReglasResponse,
     SolicitanteResumen,
@@ -177,6 +178,132 @@ async def listar_bandeja(
 async def obtener_orden(db: AsyncSession, actor: Usuario, orden_id: int) -> OrdenPedidoResponse:
     """Detalle de una orden para el dueño o un administrador con jurisdicción; si no, 404."""
     orden = await _orden_con_alcance(db, actor, orden_id)
+    return (await respuestas_de_ordenes(db, actor, [orden]))[0]
+
+
+# ── Cambio de estado (PATCH /ordenes/{id}/estado) ────────────────────────────
+
+
+def transicion_invalida(orden: OrdenPedido) -> AppError:
+    return AppError(
+        409,
+        "TRANSICION_INVALIDA",
+        f"La orden está {orden.estado.value} y no admite esta acción.",
+        estado_actual=orden.estado.value,
+    )
+
+
+def _motivo_requerido(motivo: str | None) -> str:
+    """RN-L15, RN-L16: rechazar y la cancelación del administrador exigen motivo."""
+    if motivo is None:
+        raise AppError(422, "MOTIVO_REQUERIDO", "Indicá el motivo.", campo="motivo")
+    return motivo
+
+
+def _resolver(
+    orden: OrdenPedido,
+    actor: Usuario,
+    estado_nuevo: EstadoOrdenEnum,
+    estado_lineas: EstadoDetalleEnum,
+    motivo: str | None,
+    lineas_desde: tuple[EstadoDetalleEnum, ...],
+) -> OrdenHistorialEstado:
+    """Aplica la transición en memoria: orden, líneas, resolución e historial (D-L10)."""
+    historial = OrdenHistorialEstado(
+        orden_id=orden.id,
+        estado_anterior=orden.estado,
+        estado_nuevo=estado_nuevo,
+        motivo=motivo,
+        actor_id=actor.id,
+    )
+    orden.estado = estado_nuevo
+    orden.motivo_resolucion = motivo
+    orden.resuelto_por_id = actor.id
+    orden.resuelto_en = func.now()
+    for detalle in orden.detalles:
+        if detalle.estado in lineas_desde:
+            detalle.estado = estado_lineas
+    return historial
+
+
+async def cambiar_estado_orden(
+    db: AsyncSession, actor: Usuario, orden_id: int, payload: OrdenPedidoEstadoUpdate
+) -> OrdenPedidoResponse:
+    """Aprobar, rechazar o cancelar una orden (PRE-10, RN-L14…L16, plan §8.5.4).
+
+    Orden de los controles: (1) rol, que no depende de la orden (403); (2) leer y
+    bloquear la orden con alcance (404); (3) transición válida desde el estado actual
+    (409); (4) datos del pedido (422); (5) aplicar y ``commit``. Ante un ``AppError``
+    después de bloquear, ``rollback`` antes de propagarlo (RN-L14).
+
+    - ``rechazada``: administrador con jurisdicción, orden ``pendiente``, con motivo.
+    - ``cancelada`` por el dueño: solo su orden ``pendiente``; motivo opcional. Si está
+      ``aprobada``, ``403 CANCELACION_NO_PERMITIDA`` (AC-L32).
+    - ``aprobada`` (T2.7) y la cancelación de una ``aprobada`` por el administrador
+      (T2.9) todavía responden ``501``.
+    """
+    pedido = payload.estado
+    # 1. Aprobar y rechazar son administrativos, sea o no el dueño (AC-L29).
+    if pedido is not EstadoOrdenEnum.CANCELADA and not _es_admin(actor):
+        raise AppError(
+            403, "ROL_NO_AUTORIZADO", "Solo un administrador puede aprobar o rechazar órdenes."
+        )
+    try:
+        # 2. Alcance y bloqueo de la fila (RN-L14, RN-L25, RN-L26).
+        orden = await _orden_con_alcance(db, actor, orden_id, bloquear=True)
+        actual = orden.estado
+        es_dueño = orden.solicitante_id == actor.id
+
+        if pedido is EstadoOrdenEnum.APROBADA:
+            if actual is not EstadoOrdenEnum.PENDIENTE:
+                raise transicion_invalida(orden)
+            raise AppError(501, "NO_IMPLEMENTADO", "La aprobación todavía no está disponible.")
+
+        if pedido is EstadoOrdenEnum.RECHAZADA:
+            # 3. Solo se rechaza una pendiente (AC-L28); 4. con motivo (AC-L27).
+            if actual is not EstadoOrdenEnum.PENDIENTE:
+                raise transicion_invalida(orden)
+            historial = _resolver(
+                orden,
+                actor,
+                EstadoOrdenEnum.RECHAZADA,
+                EstadoDetalleEnum.RECHAZADO,
+                _motivo_requerido(payload.motivo),
+                lineas_desde=(EstadoDetalleEnum.PENDIENTE,),
+            )
+        elif es_dueño:
+            # Cancelación del solicitante (RN-L16, AC-L31, AC-L32).
+            if actual is EstadoOrdenEnum.APROBADA:
+                raise AppError(
+                    403,
+                    "CANCELACION_NO_PERMITIDA",
+                    "Tu orden ya fue aprobada: para cancelarla, comunicate con el laboratorio.",
+                )
+            if actual is not EstadoOrdenEnum.PENDIENTE:
+                raise transicion_invalida(orden)
+            historial = _resolver(
+                orden,
+                actor,
+                EstadoOrdenEnum.CANCELADA,
+                EstadoDetalleEnum.CANCELADO,
+                payload.motivo,
+                lineas_desde=(EstadoDetalleEnum.PENDIENTE,),
+            )
+        else:
+            # Cancelación del administrador: solo una aprobada (RN-L16); llega en T2.9.
+            if actual is not EstadoOrdenEnum.APROBADA:
+                raise transicion_invalida(orden)
+            raise AppError(
+                501, "NO_IMPLEMENTADO", "Cancelar una orden aprobada todavía no está disponible."
+            )
+
+        # 5. Aplicar en una sola transacción.
+        db.add(historial)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    await db.refresh(orden)  # resuelto_en lo pone la base
     return (await respuestas_de_ordenes(db, actor, [orden]))[0]
 
 
@@ -481,4 +608,3 @@ async def crear_orden(db: AsyncSession, actor: Usuario, payload: OrdenPedidoCrea
         raise
     await db.refresh(orden)  # fecha_solicitud la pone la base
     return orden
-

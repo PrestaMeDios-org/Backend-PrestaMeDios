@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, require_roles
 from app.core.enums import RolUsuario, SedeEnum
-from app.core.errors import AppError, error_responses
+from app.core.errors import error_responses
 from app.database import get_db
 from app.modules.loans import service
 from app.modules.loans.enums import EstadoOrdenEnum
@@ -34,14 +34,6 @@ router = APIRouter()
 
 _solo_solicitantes = require_roles(RolUsuario.ESTUDIANTE, RolUsuario.DOCENTE)
 _solo_admins = require_roles(RolUsuario.ADMIN_LOCAL, RolUsuario.SUPERADMIN)
-
-
-def _pendiente() -> AppError:
-    return AppError(
-        501,
-        "NO_IMPLEMENTADO",
-        "Endpoint definido por contrato; lógica pendiente.",
-    )
 
 
 # ── Reglas operativas ────────────────────────────────────────────────────────
@@ -164,6 +156,7 @@ async def cambiar_estado_orden(
     Al aprobar se asigna una unidad por línea y se puede ajustar el horario. El
     administrador cancela únicamente órdenes ``aprobada`` de su sede, con motivo
     (libera las unidades, PRE-17). El permiso depende del rol y del estado actual,
-    por eso lo decide el servicio.
+    por eso lo decide el servicio. Aprobar y la cancelación del administrador
+    todavía responden ``501``.
     """
-    raise _pendiente()
+    return await service.cambiar_estado_orden(db, actor, orden_id, payload)
