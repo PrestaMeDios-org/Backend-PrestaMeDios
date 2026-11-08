@@ -44,7 +44,7 @@ from app.modules.loans.schemas import (
     SolicitanteResumen,
 )
 from app.modules.users.models import Usuario
-from app.modules.users.service import datos_publicos_por_ids
+from app.modules.users.service import DatosPublicosUsuario, datos_publicos_por_ids
 
 # ── Lectura de parámetros ────────────────────────────────────────────────────
 
@@ -635,6 +635,125 @@ async def ocupacion_de_unidades(
     for unidad_id, inicio, fin in filas:
         ocupacion[unidad_id].append(PeriodoOcupado(desde=inicio, hasta=fin))
     return ocupacion
+
+
+# ── Reservas e historial por unidad (API pública para inventory, Fase C de SPEC-04) ──
+
+
+@dataclass(frozen=True, slots=True)
+class ReservaFutura:
+    """Una reserva aprobada (línea ``reservado``) de una unidad, sin identidad (P6)."""
+
+    orden_id: int
+    detalle_id: int
+    retiro: datetime
+    devolucion: datetime
+
+
+async def reservas_futuras_de_unidad(
+    db: AsyncSession, unidad_id: int, desde: datetime
+) -> list[ReservaFutura]:
+    """API pública (§10.2): reservas aprobadas de la unidad que empiezan desde ``desde``.
+
+    Para el aviso de ``reservas_afectadas`` al pasar una unidad a ``mantenimiento`` o
+    ``baja`` (PRE-17, SPEC-04 §5.3): ``reservas_afectadas = len(...)``.
+
+    - Solo líneas ``reservado`` con ``retiro_pactado >= desde``; una ``entregado`` ya
+      empezó y no cuenta. Ordenadas por retiro (y por id ante un empate).
+    - ``devolucion`` es ``devolucion_pactada``.
+    - Sin solicitante ni sede: la jurisdicción la valida ``inventory`` antes de llamar.
+    - Una sola consulta. No hace ``commit`` ni ``flush``.
+    """
+    filas = await db.execute(
+        select(
+            DetallePrestamo.orden_id,
+            DetallePrestamo.id,
+            DetallePrestamo.retiro_pactado,
+            DetallePrestamo.devolucion_pactada,
+        )
+        .where(
+            DetallePrestamo.unidad_fisica_id == unidad_id,
+            DetallePrestamo.estado == EstadoDetalleEnum.RESERVADO,
+            DetallePrestamo.retiro_pactado >= desde,
+        )
+        .order_by(DetallePrestamo.retiro_pactado, DetallePrestamo.id)
+    )
+    return [
+        ReservaFutura(orden_id=orden_id, detalle_id=detalle_id, retiro=retiro, devolucion=dev)
+        for orden_id, detalle_id, retiro, dev in filas
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class MovimientoUnidad:
+    """Una línea que usó (o tiene reservada) la unidad, para su historial (PRE-12).
+
+    Campos de SPEC-04 §5.5. ``entregado_en``, ``devuelto_en`` y
+    ``observacion_devolucion`` valen ``None`` hasta la migración ``0012`` (Fase 3); ya
+    están en la firma para que el contrato no cambie.
+    """
+
+    orden_id: int
+    detalle_id: int
+    solicitante: DatosPublicosUsuario | None
+    estado: EstadoDetalleEnum
+    retiro_pactado: datetime
+    devolucion_pactada: datetime
+    entregado_en: datetime | None = None
+    devuelto_en: datetime | None = None
+    observacion_devolucion: str | None = None
+
+
+async def historial_de_unidad(
+    db: AsyncSession, unidad_id: int, actor: Usuario, *, limit: int = 20, offset: int = 0
+) -> list[MovimientoUnidad]:
+    """API pública (§10.2): las líneas de la unidad, de la más reciente a la más antigua.
+
+    Para ``GET /unidades/{id}/historial`` de ``inventory`` (PRE-12, SPEC-04 §5.5).
+
+    - Todas las líneas con esa unidad asignada, en cualquier estado, ordenadas por
+      ``retiro_pactado`` descendente (y por id ante un empate), con ``limit`` y ``offset``.
+    - Alcance (P5, RN-L26), en el ``WHERE``: el ``ADMIN_LOCAL`` ve solo las líneas de
+      órdenes de su sede y el ``SUPERADMIN`` todas; cualquier otro rol, lista vacía.
+    - ``solicitante``: ``id``, ``nombre`` y ``apellido`` de ``users.datos_publicos_por_ids``,
+      nunca DNI, email ni teléfono (P6).
+    - Dos consultas: las líneas y los solicitantes. No hace ``commit`` ni ``flush``.
+    """
+    if not _es_admin(actor):
+        return []
+    stmt = (
+        select(
+            DetallePrestamo.orden_id,
+            DetallePrestamo.id,
+            OrdenPedido.solicitante_id,
+            DetallePrestamo.estado,
+            DetallePrestamo.retiro_pactado,
+            DetallePrestamo.devolucion_pactada,
+        )
+        .join(OrdenPedido, OrdenPedido.id == DetallePrestamo.orden_id)
+        .where(
+            DetallePrestamo.unidad_fisica_id == unidad_id,
+            OrdenPedido.sede.in_(resolver_alcance_sede(actor, None)),
+        )
+        .order_by(DetallePrestamo.retiro_pactado.desc(), DetallePrestamo.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    filas = (await db.execute(stmt)).all()
+    if not filas:
+        return []
+    solicitantes = await datos_publicos_por_ids(db, {f.solicitante_id for f in filas})
+    return [
+        MovimientoUnidad(
+            orden_id=orden_id,
+            detalle_id=detalle_id,
+            solicitante=solicitantes.get(solicitante_id),
+            estado=estado,
+            retiro_pactado=retiro,
+            devolucion_pactada=devolucion,
+        )
+        for orden_id, detalle_id, solicitante_id, estado, retiro, devolucion in filas
+    ]
 
 
 # ── Crear orden (POST /ordenes) ──────────────────────────────────────────────
