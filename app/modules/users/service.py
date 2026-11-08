@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from fastapi import UploadFile
 from sqlalchemy import Integer, Select, any_, bindparam, func, or_, select
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +24,8 @@ from app.core.security import (
     verify_dummy,
     verify_password,
 )
+from app.modules.files import service as files
+from app.modules.files.enums import PropositoArchivo
 from app.modules.users.models import Usuario, UsuarioHistorialCambios, UsuarioHistorialEstado
 from app.modules.users.schemas import (
     CambioEstadoRequest,
@@ -584,6 +587,87 @@ async def editar_por_admin(
     await _persistir(db, commit=True)
     await db.refresh(objetivo)
     return objetivo
+
+
+# ── SPEC-03 · Foto de perfil (USR-03, Fase B2) ───────────────────────────────
+
+
+def _str_o_none(valor: object) -> str | None:
+    return None if valor is None else str(valor)
+
+
+async def _cambiar_foto(
+    db: AsyncSession, objetivo: Usuario, nueva_id, *, actor_id: int
+) -> Usuario:
+    """RN-59: apunta ``foto_id``, borra la anterior y deja traza, todo en una transacción.
+
+    ``objetivo`` ya está bloqueado (``FOR UPDATE``, EC-41).
+    """
+    anterior = objetivo.foto_id
+    if anterior == nueva_id:  # quitar sin foto: nada que cambiar
+        await db.commit()  # libera el lock sin expirar los atributos
+        return objetivo
+    objetivo.foto_id = nueva_id
+    await db.flush()
+    if anterior is not None:
+        await files.borrar_archivo(db, anterior)
+    _registrar_cambios(
+        db,
+        objetivo,
+        {"foto_id": [_str_o_none(anterior), _str_o_none(nueva_id)]},
+        actor_id=actor_id,
+    )
+    await db.commit()
+    await db.refresh(objetivo)
+    return objetivo
+
+
+async def reemplazar_foto(
+    db: AsyncSession, usuario: Usuario, archivo: UploadFile, *, content_length: int | None
+) -> Usuario:
+    """``PUT /auth/me/foto``: sube, vincula y reemplaza en un solo paso (USR-03, D-11).
+
+    La imagen se procesa antes de bloquear la fila, para no retener el lock.
+    """
+    jpeg, nombre = await files.preparar_foto(archivo, content_length=content_length)
+    objetivo = await _bloquear(db, usuario.id)
+    nueva = await files.guardar_archivo(
+        db,
+        propietario=objetivo,
+        proposito=PropositoArchivo.FOTO_PERFIL,
+        datos=jpeg,
+        tipo_mime=files.JPEG,
+        nombre=nombre,
+        vinculado=True,
+    )
+    return await _cambiar_foto(db, objetivo, nueva.id, actor_id=usuario.id)
+
+
+async def quitar_foto(db: AsyncSession, usuario: Usuario) -> Usuario:
+    """``DELETE /auth/me/foto``. Sin foto, no cambia nada (RN-59)."""
+    objetivo = await _bloquear(db, usuario.id)
+    return await _cambiar_foto(db, objetivo, None, actor_id=usuario.id)
+
+
+async def quitar_foto_por_admin(db: AsyncSession, actor: Usuario, usuario_id: int) -> Usuario:
+    """``DELETE /users/{id}/foto`` con las reglas de UC-12 de SPEC-02 (RN-64).
+
+    Fuera de la jurisdicción responde ``404``; el ``ADMIN_LOCAL`` sobre una cuenta que
+    no es de estudiante ni de docente, ``403``.
+    """
+    objetivo = await db.scalar(
+        select(Usuario)
+        .where(Usuario.id == usuario_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if objetivo is None or not _en_jurisdiccion(actor, objetivo):
+        await db.rollback()
+        raise usuario_no_encontrado()
+    if actor.rol == RolUsuario.ADMIN_LOCAL and objetivo.rol not in ROLES_GESTIONABLES_POR_ADMIN_LOCAL:
+        await db.rollback()
+        raise permiso_insuficiente()
+    return await _cambiar_foto(db, objetivo, None, actor_id=actor.id)
 
 
 # ── API pública para otros módulos (SPEC-03 §4, P3.3) ────────────────────────
