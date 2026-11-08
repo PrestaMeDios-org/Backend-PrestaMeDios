@@ -1,6 +1,7 @@
 """Modelos ORM del módulo `users` (SPEC-01 §4.2, §4.3).
 
-Tablas: ``usuarios``, ``usuarios_historial_estado`` y ``usuarios_historial_cambios``. No hay borrado físico
+Tablas: ``usuarios``, ``usuarios_historial_estado``, ``usuarios_historial_cambios`` y,
+para USR-02, ``tokens_recuperacion`` e ``intentos_recuperacion`` (SPEC-03 §5.2). No hay borrado físico
 de usuarios: la baja es lógica (``INACTIVO``, RN-17).
 """
 
@@ -8,6 +9,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    CHAR,
     BigInteger,
     CheckConstraint,
     DateTime,
@@ -134,6 +136,48 @@ class UsuarioHistorialCambios(Base):
     usuario_id: Mapped[int] = mapped_column(ForeignKey("usuarios.id", ondelete="CASCADE"))
     actor_id: Mapped[int | None] = mapped_column(ForeignKey("usuarios.id", ondelete="SET NULL"))
     cambios: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class TokenRecuperacion(Base):
+    """Token de recuperación de contraseña (USR-02, SPEC-03 RN-46…RN-48).
+
+    Se guarda sólo el SHA-256 del token, nunca el token.
+    """
+
+    __tablename__ = "tokens_recuperacion"
+    __table_args__ = (
+        Index("ix_tokens_recuperacion_usuario_id_usado_en", "usuario_id", "usado_en"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    usuario_id: Mapped[int] = mapped_column(ForeignKey("usuarios.id", ondelete="CASCADE"))
+    token_hash: Mapped[str] = mapped_column(CHAR(64), unique=True)
+    expira_en: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    usado_en: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class IntentoRecuperacion(Base):
+    """Solicitud de recuperación, para el límite por email y por IP (SPEC-03 RN-49).
+
+    Guarda un HMAC del email normalizado, no el email. Sin FK: se cuenta exista o no
+    la cuenta.
+    """
+
+    __tablename__ = "intentos_recuperacion"
+    __table_args__ = (
+        Index("ix_intentos_recuperacion_email_hash_created_at", "email_hash", "created_at"),
+        Index("ix_intentos_recuperacion_ip_created_at", "ip", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    email_hash: Mapped[str] = mapped_column(CHAR(64))
+    ip: Mapped[str] = mapped_column(String(45))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
