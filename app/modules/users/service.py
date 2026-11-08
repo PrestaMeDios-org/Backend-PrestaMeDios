@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import UploadFile
+from fastapi.exceptions import RequestValidationError
 from sqlalchemy import Integer, Select, any_, bindparam, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
@@ -40,6 +41,7 @@ from app.modules.users.models import (
     UsuarioHistorialEstado,
 )
 from app.modules.users.schemas import (
+    validar_politica_password,
     CambioEstadoRequest,
     CambioPasswordRequest,
     PerfilUpdate,
@@ -805,6 +807,80 @@ async def enviar_correo_recuperacion(pendiente: CorreoRecuperacion) -> None:
         logger.warning(
             "No se pudo enviar el correo de recuperación: usuario_id=%s", pendiente.usuario_id
         )
+
+
+MENSAJE_RECUPERACION_CONFIRMADA = "Tu contraseña se actualizó. Iniciá sesión con la nueva."
+
+
+def _token_recuperacion_invalido() -> AppError:
+    return AppError(
+        422, "TOKEN_RECUPERACION_INVALIDO", "El enlace no es válido o ya venció. Pedí uno nuevo."
+    )
+
+
+def _token_vigente(token_hash: str):
+    return (
+        TokenRecuperacion.token_hash == token_hash,
+        TokenRecuperacion.usado_en.is_(None),
+        TokenRecuperacion.expira_en > func.now(),
+    )
+
+
+async def confirmar_recuperacion(db: AsyncSession, token: str, password_nueva: str) -> None:
+    """Restablece la contraseña con el token del enlace (USR-02, RN-50…RN-52).
+
+    - Un token inexistente, vencido, usado o de una cuenta que ya no está ``ACTIVO``
+      responde lo mismo: ``422 TOKEN_RECUPERACION_INVALIDO`` (RN-51).
+    - La contraseña igual al email se rechaza **antes** de consumir el token (AC-77).
+    - El consumo es un ``UPDATE ... RETURNING`` atómico: de dos confirmaciones
+      simultáneas sólo una prospera (RN-50).
+    - Nuevo hash, ``token_version + 1`` (cierra todas las sesiones), sin cambio
+      obligatorio, demás tokens invalidados y traza sin la contraseña (RN-48, RN-52).
+      No inicia sesión (D-09).
+    """
+    token_hash = _hash_token(token)
+    email = await db.scalar(
+        select(Usuario.email)
+        .join(TokenRecuperacion, TokenRecuperacion.usuario_id == Usuario.id)
+        .where(*_token_vigente(token_hash))
+    )
+    if email is None:
+        raise _token_recuperacion_invalido()
+    try:
+        validar_politica_password(password_nueva, email)  # RN-03 con el email de la cuenta
+    except ValueError as exc:
+        await db.rollback()
+        raise RequestValidationError(
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("body", "password_nueva"),
+                    "msg": str(exc),
+                    "input": None,
+                }
+            ]
+        ) from None
+
+    usuario_id = await db.scalar(
+        update(TokenRecuperacion)
+        .where(*_token_vigente(token_hash))
+        .values(usado_en=func.now())
+        .returning(TokenRecuperacion.usuario_id)
+    )
+    if usuario_id is None:  # otra confirmación lo consumió primero (RN-50)
+        await db.rollback()
+        raise _token_recuperacion_invalido()
+    usuario = await _bloquear(db, usuario_id)
+    if usuario.estado != E.ACTIVO:  # RN-51, EC-38
+        await db.rollback()
+        raise _token_recuperacion_invalido()
+
+    usuario.password_hash = hash_password(password_nueva)
+    usuario.token_version += 1  # RN-08: cierra todas las sesiones (EC-37)
+    usuario.debe_cambiar_password = False  # EC-39: la eligió el propio usuario
+    await _invalidar_tokens_recuperacion(db, usuario_id)  # RN-48
+    _registrar_cambios(db, usuario, {"password": [_OCULTO, _OCULTO]}, actor_id=usuario_id)
+    await db.commit()
 
 
 # ── API pública para otros módulos (SPEC-03 §4, P3.3) ────────────────────────

@@ -17,6 +17,7 @@ from app.modules.users.models import Usuario
 from app.modules.users.schemas import (
     CambioEstadoRequest,
     CambioPasswordRequest,
+    ConfirmacionRecuperacion,
     MENSAJE_RECUPERACION_NEUTRO,
     MensajeResponse,
     SolicitudRecuperacion,
@@ -179,6 +180,26 @@ async def solicitar_recuperacion(
     if pendiente is not None:
         tareas.add_task(service.enviar_correo_recuperacion, pendiente)
     return MensajeResponse(detail=MENSAJE_RECUPERACION_NEUTRO)
+
+
+
+@auth_router.post(
+    "/recuperacion/confirmar",
+    response_model=MensajeResponse,
+    summary="Restablecer la contraseña con el enlace recibido",
+    responses=error_responses(422),
+)
+async def confirmar_recuperacion(
+    payload: ConfirmacionRecuperacion, db: AsyncSession = Depends(get_db)
+) -> MensajeResponse:
+    """Público (excepción a P4.1). Cierra todas las sesiones y no inicia una nueva (RN-52).
+
+    Token inexistente, vencido, usado o de una cuenta no activa: ``422
+    TOKEN_RECUPERACION_INVALIDO`` (RN-51). El token viaja en el cuerpo, nunca en la URL
+    (RN-47).
+    """
+    await service.confirmar_recuperacion(db, payload.token, payload.password_nueva)
+    return MensajeResponse(detail=service.MENSAJE_RECUPERACION_CONFIRMADA)
 
 
 # ── /users ───────────────────────────────────────────────────────────────────
