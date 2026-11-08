@@ -35,10 +35,10 @@ def _nombres(op: Mock, metodo: str) -> list:
     return [c.args[0] for c in getattr(op, metodo).call_args_list]
 
 
-def test_encadena_con_la_0010():
+def test_encadena_con_la_0013():  # C19: la 0013 (SPEC-06) entró antes a develop
     migracion = _cargar()
     assert migracion.revision == "0011_loans_resolucion"
-    assert migracion.down_revision == "0010_inventory_gestion"
+    assert migracion.down_revision == "0013_notifications_init"
 
 
 def test_alembic_tiene_una_sola_cabeza():  # C19: falla si otra migración cuelga de la misma base

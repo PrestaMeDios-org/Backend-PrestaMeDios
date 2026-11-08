@@ -5,12 +5,13 @@
 - ``ordenes_historial_estado``: traza inmutable de cada transición de la orden,
   igual que ``usuarios_historial_estado`` (P7.3, D-L10).
 
-``down_revision`` apunta a la cabeza de ``develop`` al abrir el PR. Si
-``0013_notifications_init`` (SPEC-06) se mergea antes, esta migración pasa a
-colgar de ella (C19; plan de SPEC-05 §8.3, V5).
+Cuelga de ``0013_notifications_init`` (SPEC-06), que entró antes a ``develop``
+(backend PR #22): la que se mergea segunda reapunta su ``down_revision`` a la
+cabeza de ``develop`` (C19; plan de SPEC-05 §8.3, V5). Alembic encadena por id,
+no por número: 0010 → 0013 → 0011.
 
 Revision ID: 0011_loans_resolucion
-Revises: 0010_inventory_gestion
+Revises: 0013_notifications_init
 Create Date: 2026-11-07
 """
 
@@ -21,7 +22,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0011_loans_resolucion"
-down_revision: Union[str, None] = "0010_inventory_gestion"
+down_revision: Union[str, None] = "0013_notifications_init"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
