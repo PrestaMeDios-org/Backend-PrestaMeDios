@@ -40,7 +40,7 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 | `inventory` | `/api/v1/inventory` | PRE-01, PRE-02, PRE-12, PRE-14, PRE-19 | Implementado |
 | `spaces` | `/api/v1/spaces` | RES-01…RES-05, GLO-02, GLO-04 | Implementado |
 | `loans` | `/api/v1/loans` | PRE-03…PRE-11, PRE-13, PRE-15…PRE-18, PRE-20 | Sólo contratos: los endpoints exigen sesión y responden `501 NO_IMPLEMENTADO` |
-| `notifications` | — | NOV-01…NOV-04 | Pendiente |
+| `notifications` | `/api/v1/notifications` | NOV-01, NOV-02, NOV-04 (NOV-03 diferido) | Comunicados implementados (SPEC-06 Fase A); notificaciones personales en la Fase B |
 | `assistant` | — | IA-01…IA-03 | Pendiente |
 
 **Roles:** `SUPERADMIN` (ambas sedes) · `ADMIN_LOCAL` (una sede) · `DOCENTE` · `ESTUDIANTE`. Los usuarios sólo operan sobre los recursos de su sede, excepto el Superadministrador.
@@ -159,6 +159,9 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | | `GET/POST /api/v1/spaces/reservas` · `PATCH …/{id}/estado` | Solicitudes y su ciclo de vida |
 | | `GET/POST /api/v1/spaces/bloqueos` | Bloqueos administrativos |
 | | `GET /api/v1/spaces/disponibilidad` | Franjas libres y ocupadas por fecha |
+| Comunicados | `GET /api/v1/notifications/comunicados[/{id}]` | Comunicados de la sede del usuario más los globales. Estudiantes y docentes ven sólo los vigentes; `sede` sólo para el Superadministrador e `incluir_archivados` sólo para administradores |
+| | `POST /api/v1/notifications/comunicados` | Publicar. `ADMIN_LOCAL`: en su sede. `SUPERADMIN`: `sede` o `es_global` (uno de los dos) |
+| | `PATCH /api/v1/notifications/comunicados/{id}` · `PATCH …/{id}/estado` | Editar título, contenido y vencimiento; archivar o reactivar |
 | Salud | `GET /health` | Health check |
 
 ---
