@@ -15,21 +15,36 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.deps import puede_ver_sede, resolver_alcance_sede
 from app.core.enums import RolUsuario, SedeEnum
 from app.core.errors import AppError
 from app.core.settings import ZONA_HORARIA_LAB, ahora_lab
 from app.modules.config.service import obtener_parametro
-from app.modules.inventory.service import datos_equipamiento_por_ids, unidades_asignables
+from app.modules.inventory.service import (
+    bloquear_unidad,
+    datos_equipamiento_por_ids,
+    unidad_es_asignable,
+    unidades_asignables,
+)
 from app.modules.loans.enums import (
     ESTADOS_DETALLE_QUE_OCUPAN,
     EstadoDetalleEnum,
     EstadoOrdenEnum,
 )
-from app.modules.loans.models import DetallePrestamo, OrdenPedido
-from app.modules.loans.schemas import OrdenPedidoCreate, ReglasResponse
+from app.modules.loans.models import DetallePrestamo, OrdenHistorialEstado, OrdenPedido
+from app.modules.loans.schemas import (
+    LineaUnidadesLibresResponse,
+    OrdenPedidoCreate,
+    OrdenPedidoEstadoUpdate,
+    OrdenPedidoResponse,
+    ReglasResponse,
+    SolicitanteResumen,
+)
 from app.modules.users.models import Usuario
+from app.modules.users.service import DatosPublicosUsuario, datos_publicos_por_ids
 
 # ── Lectura de parámetros ────────────────────────────────────────────────────
 
@@ -84,15 +99,315 @@ async def listar_mis_ordenes(
     return list((await db.scalars(stmt)).all())
 
 
-async def obtener_orden(db: AsyncSession, actor: Usuario, orden_id: int) -> OrdenPedido:
-    """Detalle de una orden. En la Fase 1 solo la ve su dueño; para el resto, 404 (P6)."""
-    stmt = select(OrdenPedido).where(
-        OrdenPedido.id == orden_id, OrdenPedido.solicitante_id == actor.id
-    )
+# ── Alcance y respuestas (Fase 2) ────────────────────────────────────────────
+
+_ROLES_ADMIN = (RolUsuario.ADMIN_LOCAL, RolUsuario.SUPERADMIN)
+
+
+def _es_admin(actor: Usuario) -> bool:
+    return actor.rol in _ROLES_ADMIN
+
+
+def _puede_ver(actor: Usuario, orden: OrdenPedido) -> bool:
+    """La ve el dueño y el administrador con jurisdicción sobre su sede (RN-L25, RN-L26)."""
+    if orden.solicitante_id == actor.id:
+        return True
+    return _es_admin(actor) and puede_ver_sede(actor, orden.sede)
+
+
+async def _orden_con_alcance(
+    db: AsyncSession, actor: Usuario, orden_id: int, *, bloquear: bool = False
+) -> OrdenPedido:
+    """La orden si ``actor`` puede verla; si no existe o no tiene alcance, 404 (nunca 403).
+
+    Con ``bloquear=True`` la lee con ``SELECT ... FOR UPDATE`` para serializar las
+    transiciones de la orden (RN-L14) y descarta lo que hubiera en la sesión.
+    """
+    stmt = select(OrdenPedido).where(OrdenPedido.id == orden_id)
+    if bloquear:
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
     orden = await db.scalar(stmt)
-    if orden is None:
+    if orden is None or not _puede_ver(actor, orden):
         raise orden_no_encontrada()
     return orden
+
+
+async def respuestas_de_ordenes(
+    db: AsyncSession, actor: Usuario, ordenes: Sequence[OrdenPedido]
+) -> list[OrdenPedidoResponse]:
+    """Arma las respuestas; para administradores suma el resumen del solicitante.
+
+    Una sola consulta a ``users.datos_publicos_por_ids`` para todas las órdenes (P6:
+    solo ``id``, ``nombre`` y ``apellido``). El dueño recibe ``solicitante = null``.
+    """
+    respuestas = [OrdenPedidoResponse.model_validate(o) for o in ordenes]
+    if not _es_admin(actor) or not respuestas:
+        return respuestas
+    datos = await datos_publicos_por_ids(db, [r.solicitante_id for r in respuestas])
+    return [
+        r.model_copy(
+            update={"solicitante": SolicitanteResumen.model_validate(datos[r.solicitante_id])}
+        )
+        if r.solicitante_id in datos
+        else r
+        for r in respuestas
+    ]
+
+
+async def listar_bandeja(
+    db: AsyncSession,
+    actor: Usuario,
+    estado: EstadoOrdenEnum,
+    sede: SedeEnum | None,
+    limit: int,
+    offset: int,
+) -> list[OrdenPedidoResponse]:
+    """Bandeja de validación (PRE-15): órdenes de la jurisdicción del administrador.
+
+    - Sedes con ``resolver_alcance_sede``: el ``ADMIN_LOCAL`` siempre la suya (pedir
+      otra responde ``403 SEDE_FUERA_DE_ALCANCE``); el ``SUPERADMIN``, la indicada o
+      ambas. El filtro va en el ``WHERE`` (RN-L26).
+    - De la más vieja a la más nueva, para atender primero lo que espera hace más.
+    - Con el resumen del solicitante (P6).
+    """
+    sedes = resolver_alcance_sede(actor, sede)
+    stmt = (
+        select(OrdenPedido)
+        .where(OrdenPedido.sede.in_(sedes), OrdenPedido.estado == estado)
+        .order_by(OrdenPedido.fecha_solicitud.asc(), OrdenPedido.id.asc())
+        .limit(limit)
+        .offset(offset)
+    )
+    ordenes = list((await db.scalars(stmt)).all())
+    return await respuestas_de_ordenes(db, actor, ordenes)
+
+
+async def obtener_orden(db: AsyncSession, actor: Usuario, orden_id: int) -> OrdenPedidoResponse:
+    """Detalle de una orden para el dueño o un administrador con jurisdicción; si no, 404."""
+    orden = await _orden_con_alcance(db, actor, orden_id)
+    return (await respuestas_de_ordenes(db, actor, [orden]))[0]
+
+
+# ── Cambio de estado (PATCH /ordenes/{id}/estado) ────────────────────────────
+
+
+def transicion_invalida(orden: OrdenPedido) -> AppError:
+    return AppError(
+        409,
+        "TRANSICION_INVALIDA",
+        f"La orden está {orden.estado.value} y no admite esta acción.",
+        estado_actual=orden.estado.value,
+    )
+
+
+def _motivo_requerido(motivo: str | None) -> str:
+    """RN-L15, RN-L16: rechazar y la cancelación del administrador exigen motivo."""
+    if motivo is None:
+        raise AppError(422, "MOTIVO_REQUERIDO", "Indicá el motivo.", campo="motivo")
+    return motivo
+
+
+def _resolver(
+    orden: OrdenPedido,
+    actor: Usuario,
+    estado_nuevo: EstadoOrdenEnum,
+    estado_lineas: EstadoDetalleEnum,
+    motivo: str | None,
+    lineas_desde: tuple[EstadoDetalleEnum, ...],
+) -> OrdenHistorialEstado:
+    """Aplica la transición en memoria: orden, líneas, resolución e historial (D-L10)."""
+    historial = OrdenHistorialEstado(
+        orden_id=orden.id,
+        estado_anterior=orden.estado,
+        estado_nuevo=estado_nuevo,
+        motivo=motivo,
+        actor_id=actor.id,
+    )
+    orden.estado = estado_nuevo
+    orden.motivo_resolucion = motivo
+    orden.resuelto_por_id = actor.id
+    orden.resuelto_en = func.now()
+    for detalle in orden.detalles:
+        if detalle.estado in lineas_desde:
+            detalle.estado = estado_lineas
+    return historial
+
+
+_SQLSTATE_EXCLUSION = "23P01"
+
+
+def _es_solapamiento(exc: IntegrityError) -> bool:
+    """¿La base rechazó la escritura por el ``EXCLUDE`` (SQLSTATE ``23P01``)?"""
+    orig = exc.orig
+    return _SQLSTATE_EXCLUSION in (getattr(orig, "sqlstate", None), getattr(orig, "pgcode", None))
+
+
+def _asignaciones_invalidas(detalle: str) -> AppError:
+    return AppError(422, "ASIGNACIONES_INVALIDAS", detalle)
+
+
+def _unidad_no_asignable(detalle_id: int, unidad_id: int) -> AppError:
+    return AppError(
+        422,
+        "UNIDAD_NO_ASIGNABLE",
+        "La unidad elegida no se puede asignar a esa línea: no está disponible, "
+        "es de otra sede o de otro equipo.",
+        detalle_id=detalle_id,
+        unidad_fisica_id=unidad_id,
+    )
+
+
+async def _aprobar(
+    db: AsyncSession, orden: OrdenPedido, actor: Usuario, payload: OrdenPedidoEstadoUpdate
+) -> OrdenHistorialEstado:
+    """Aprobación de una orden ``pendiente`` ya bloqueada (RN-L11…L13, RN-L27, plan §8.5.5).
+
+    1. Sin ajuste horario, el retiro tiene que ser futuro (``422 RETIRO_VENCIDO``). No se
+       revalidan plazos ni franja (EC-L11). El ajuste horario (T2.10) todavía responde 501.
+    2. Exactamente una asignación por línea, sin líneas ajenas ni unidades repetidas
+       (``422 ASIGNACIONES_INVALIDAS``, AC-L22).
+    3. Cada unidad se bloquea en orden ascendente de id (RN-L14) y tiene que ser del
+       modelo de la línea, de la sede de la orden, ``disponible`` y de un ítem activo
+       (``422 UNIDAD_NO_ASIGNABLE``, AC-L20, L21, L26; EC-L08). ``loans`` solo lee la
+       unidad: su estado es de ``inventory`` (DT-20).
+    4. Líneas ``reservado`` con su unidad. El solapamiento con otra reserva lo rechaza la
+       base al hacer ``commit`` (``409 UNIDAD_NO_DISPONIBLE``, lo traduce quien llama).
+    """
+    # 1. Retiro vencido (RN-L27, AC-L30).
+    if payload.nuevo_retiro is not None:
+        raise AppError(501, "NO_IMPLEMENTADO", "El ajuste horario todavía no está disponible.")
+    retiro = min((d.retiro_pactado for d in orden.detalles), default=None)
+    if retiro is not None and retiro <= ahora_lab():
+        raise AppError(
+            422,
+            "RETIRO_VENCIDO",
+            "La fecha de retiro ya pasó: rechazá la orden o aprobala ajustando el horario.",
+        )
+
+    # 2. Asignaciones (RN-L11, AC-L22). El esquema ya rechaza dos para la misma línea.
+    lineas = {d.id: d for d in orden.detalles}
+    unidad_de = {a.detalle_id: a.unidad_fisica_id for a in payload.asignaciones}
+    if set(unidad_de) - set(lineas):
+        raise _asignaciones_invalidas("Hay asignaciones para líneas que no son de esta orden.")
+    if set(lineas) - set(unidad_de):
+        raise _asignaciones_invalidas("Asigná una unidad a cada línea de la orden.")
+    if len(set(unidad_de.values())) != len(unidad_de):
+        raise _asignaciones_invalidas("No se puede asignar la misma unidad a dos líneas.")
+
+    # 3. Unidades, bloqueadas en orden ascendente de id (RN-L14).
+    for detalle_id, unidad_id in sorted(unidad_de.items(), key=lambda par: par[1]):
+        unidad = await bloquear_unidad(db, unidad_id)
+        if (
+            unidad is None
+            or unidad.equipamiento_id != lineas[detalle_id].equipamiento_id
+            or not await unidad_es_asignable(db, unidad_id, orden.sede)
+        ):
+            raise _unidad_no_asignable(detalle_id, unidad_id)
+
+    # 4. Aplicar (AC-L19).
+    for detalle_id, unidad_id in unidad_de.items():
+        lineas[detalle_id].unidad_fisica_id = unidad_id
+    return _resolver(
+        orden,
+        actor,
+        EstadoOrdenEnum.APROBADA,
+        EstadoDetalleEnum.RESERVADO,
+        payload.motivo,
+        lineas_desde=(EstadoDetalleEnum.PENDIENTE,),
+    )
+
+
+async def cambiar_estado_orden(
+    db: AsyncSession, actor: Usuario, orden_id: int, payload: OrdenPedidoEstadoUpdate
+) -> OrdenPedidoResponse:
+    """Aprobar, rechazar o cancelar una orden (PRE-10, RN-L14…L16, plan §8.5.4).
+
+    Orden de los controles: (1) rol, que no depende de la orden (403); (2) leer y
+    bloquear la orden con alcance (404); (3) transición válida desde el estado actual
+    (409); (4) datos del pedido (422); (5) aplicar y ``commit``. Ante un ``AppError``
+    después de bloquear, ``rollback`` antes de propagarlo (RN-L14).
+
+    - ``rechazada``: administrador con jurisdicción, orden ``pendiente``, con motivo.
+    - ``cancelada`` por el dueño: solo su orden ``pendiente``; motivo opcional. Si está
+      ``aprobada``, ``403 CANCELACION_NO_PERMITIDA`` (AC-L32).
+    - ``aprobada``: administrador con jurisdicción, orden ``pendiente``, una unidad por
+      línea (``_aprobar``). Un solapamiento que rechaza la base responde
+      ``409 UNIDAD_NO_DISPONIBLE`` sin cambios parciales (RN-L13).
+    - El ajuste horario (T2.10) y la cancelación de una ``aprobada`` por el
+      administrador (T2.9) todavía responden ``501``.
+    """
+    pedido = payload.estado
+    # 1. Aprobar y rechazar son administrativos, sea o no el dueño (AC-L29).
+    if pedido is not EstadoOrdenEnum.CANCELADA and not _es_admin(actor):
+        raise AppError(
+            403, "ROL_NO_AUTORIZADO", "Solo un administrador puede aprobar o rechazar órdenes."
+        )
+    try:
+        # 2. Alcance y bloqueo de la fila (RN-L14, RN-L25, RN-L26).
+        orden = await _orden_con_alcance(db, actor, orden_id, bloquear=True)
+        actual = orden.estado
+        es_dueño = orden.solicitante_id == actor.id
+
+        if pedido is EstadoOrdenEnum.APROBADA:
+            if actual is not EstadoOrdenEnum.PENDIENTE:
+                raise transicion_invalida(orden)
+            historial = await _aprobar(db, orden, actor, payload)
+
+        elif pedido is EstadoOrdenEnum.RECHAZADA:
+            # 3. Solo se rechaza una pendiente (AC-L28); 4. con motivo (AC-L27).
+            if actual is not EstadoOrdenEnum.PENDIENTE:
+                raise transicion_invalida(orden)
+            historial = _resolver(
+                orden,
+                actor,
+                EstadoOrdenEnum.RECHAZADA,
+                EstadoDetalleEnum.RECHAZADO,
+                _motivo_requerido(payload.motivo),
+                lineas_desde=(EstadoDetalleEnum.PENDIENTE,),
+            )
+        elif es_dueño:
+            # Cancelación del solicitante (RN-L16, AC-L31, AC-L32).
+            if actual is EstadoOrdenEnum.APROBADA:
+                raise AppError(
+                    403,
+                    "CANCELACION_NO_PERMITIDA",
+                    "Tu orden ya fue aprobada: para cancelarla, comunicate con el laboratorio.",
+                )
+            if actual is not EstadoOrdenEnum.PENDIENTE:
+                raise transicion_invalida(orden)
+            historial = _resolver(
+                orden,
+                actor,
+                EstadoOrdenEnum.CANCELADA,
+                EstadoDetalleEnum.CANCELADO,
+                payload.motivo,
+                lineas_desde=(EstadoDetalleEnum.PENDIENTE,),
+            )
+        else:
+            # Cancelación del administrador: solo una aprobada (RN-L16); llega en T2.9.
+            if actual is not EstadoOrdenEnum.APROBADA:
+                raise transicion_invalida(orden)
+            raise AppError(
+                501, "NO_IMPLEMENTADO", "Cancelar una orden aprobada todavía no está disponible."
+            )
+
+        # 5. Aplicar en una sola transacción: todo o nada (RN-L13).
+        db.add(historial)
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        if _es_solapamiento(exc):  # el EXCLUDE de 0009 (RN-L12, AC-L23, AC-L47)
+            raise AppError(
+                409,
+                "UNIDAD_NO_DISPONIBLE",
+                "Alguna de las unidades ya está reservada en fechas que se superponen.",
+            ) from exc
+        raise  # CHECK, unicidad o FK no se enmascaran como conflicto (AC-L53)
+    except Exception:
+        await db.rollback()
+        raise
+    await db.refresh(orden)  # resuelto_en lo pone la base
+    return (await respuestas_de_ordenes(db, actor, [orden]))[0]
 
 
 # ── Validaciones puras (sin base de datos) ───────────────────────────────────
@@ -241,6 +556,35 @@ async def unidades_libres(
     return {m: len(ids) for m, ids in libres.items()}
 
 
+async def unidades_libres_de_orden(
+    db: AsyncSession, actor: Usuario, orden_id: int
+) -> list[LineaUnidadesLibresResponse]:
+    """Por cada línea de la orden, las unidades que se le pueden asignar (RN-L12, AC-L58).
+
+    Mismo criterio que ``ids_unidades_libres``: del modelo de la línea, en la sede de la
+    orden, ``disponible`` y sin otra línea ocupante que se solape con su período. Una
+    reserva en otras fechas no la excluye (AC-L47). Fuera de alcance, 404 (RN-L26).
+    Las líneas de una orden comparten el período, así que alcanza con una llamada; se
+    agrupa por período por si una línea quedara con otro.
+    """
+    orden = await _orden_con_alcance(db, actor, orden_id)
+    por_periodo: dict[tuple[datetime, datetime], list[DetallePrestamo]] = {}
+    for detalle in orden.detalles:
+        periodo = (detalle.retiro_pactado, detalle.fin_ocupacion)
+        por_periodo.setdefault(periodo, []).append(detalle)
+    libres: dict[int, list[int]] = {}  # detalle_id → ids de unidades
+    for (desde, hasta), detalles in por_periodo.items():
+        modelos = [d.equipamiento_id for d in detalles]
+        por_modelo = await ids_unidades_libres(db, modelos, orden.sede, desde, hasta)
+        libres |= {d.id: por_modelo[d.equipamiento_id] for d in detalles}
+    return [
+        LineaUnidadesLibresResponse(
+            detalle_id=d.id, equipamiento_id=d.equipamiento_id, unidades=libres[d.id]
+        )
+        for d in orden.detalles
+    ]
+
+
 # ── Ocupación por unidad (API pública para inventory, PRE-01) ────────────────
 
 
@@ -293,6 +637,125 @@ async def ocupacion_de_unidades(
     return ocupacion
 
 
+# ── Reservas e historial por unidad (API pública para inventory, Fase C de SPEC-04) ──
+
+
+@dataclass(frozen=True, slots=True)
+class ReservaFutura:
+    """Una reserva aprobada (línea ``reservado``) de una unidad, sin identidad (P6)."""
+
+    orden_id: int
+    detalle_id: int
+    retiro: datetime
+    devolucion: datetime
+
+
+async def reservas_futuras_de_unidad(
+    db: AsyncSession, unidad_id: int, desde: datetime
+) -> list[ReservaFutura]:
+    """API pública (§10.2): reservas aprobadas de la unidad que empiezan desde ``desde``.
+
+    Para el aviso de ``reservas_afectadas`` al pasar una unidad a ``mantenimiento`` o
+    ``baja`` (PRE-17, SPEC-04 §5.3): ``reservas_afectadas = len(...)``.
+
+    - Solo líneas ``reservado`` con ``retiro_pactado >= desde``; una ``entregado`` ya
+      empezó y no cuenta. Ordenadas por retiro (y por id ante un empate).
+    - ``devolucion`` es ``devolucion_pactada``.
+    - Sin solicitante ni sede: la jurisdicción la valida ``inventory`` antes de llamar.
+    - Una sola consulta. No hace ``commit`` ni ``flush``.
+    """
+    filas = await db.execute(
+        select(
+            DetallePrestamo.orden_id,
+            DetallePrestamo.id,
+            DetallePrestamo.retiro_pactado,
+            DetallePrestamo.devolucion_pactada,
+        )
+        .where(
+            DetallePrestamo.unidad_fisica_id == unidad_id,
+            DetallePrestamo.estado == EstadoDetalleEnum.RESERVADO,
+            DetallePrestamo.retiro_pactado >= desde,
+        )
+        .order_by(DetallePrestamo.retiro_pactado, DetallePrestamo.id)
+    )
+    return [
+        ReservaFutura(orden_id=orden_id, detalle_id=detalle_id, retiro=retiro, devolucion=dev)
+        for orden_id, detalle_id, retiro, dev in filas
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class MovimientoUnidad:
+    """Una línea que usó (o tiene reservada) la unidad, para su historial (PRE-12).
+
+    Campos de SPEC-04 §5.5. ``entregado_en``, ``devuelto_en`` y
+    ``observacion_devolucion`` valen ``None`` hasta la migración ``0012`` (Fase 3); ya
+    están en la firma para que el contrato no cambie.
+    """
+
+    orden_id: int
+    detalle_id: int
+    solicitante: DatosPublicosUsuario | None
+    estado: EstadoDetalleEnum
+    retiro_pactado: datetime
+    devolucion_pactada: datetime
+    entregado_en: datetime | None = None
+    devuelto_en: datetime | None = None
+    observacion_devolucion: str | None = None
+
+
+async def historial_de_unidad(
+    db: AsyncSession, unidad_id: int, actor: Usuario, *, limit: int = 20, offset: int = 0
+) -> list[MovimientoUnidad]:
+    """API pública (§10.2): las líneas de la unidad, de la más reciente a la más antigua.
+
+    Para ``GET /unidades/{id}/historial`` de ``inventory`` (PRE-12, SPEC-04 §5.5).
+
+    - Todas las líneas con esa unidad asignada, en cualquier estado, ordenadas por
+      ``retiro_pactado`` descendente (y por id ante un empate), con ``limit`` y ``offset``.
+    - Alcance (P5, RN-L26), en el ``WHERE``: el ``ADMIN_LOCAL`` ve solo las líneas de
+      órdenes de su sede y el ``SUPERADMIN`` todas; cualquier otro rol, lista vacía.
+    - ``solicitante``: ``id``, ``nombre`` y ``apellido`` de ``users.datos_publicos_por_ids``,
+      nunca DNI, email ni teléfono (P6).
+    - Dos consultas: las líneas y los solicitantes. No hace ``commit`` ni ``flush``.
+    """
+    if not _es_admin(actor):
+        return []
+    stmt = (
+        select(
+            DetallePrestamo.orden_id,
+            DetallePrestamo.id,
+            OrdenPedido.solicitante_id,
+            DetallePrestamo.estado,
+            DetallePrestamo.retiro_pactado,
+            DetallePrestamo.devolucion_pactada,
+        )
+        .join(OrdenPedido, OrdenPedido.id == DetallePrestamo.orden_id)
+        .where(
+            DetallePrestamo.unidad_fisica_id == unidad_id,
+            OrdenPedido.sede.in_(resolver_alcance_sede(actor, None)),
+        )
+        .order_by(DetallePrestamo.retiro_pactado.desc(), DetallePrestamo.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    filas = (await db.execute(stmt)).all()
+    if not filas:
+        return []
+    solicitantes = await datos_publicos_por_ids(db, {f.solicitante_id for f in filas})
+    return [
+        MovimientoUnidad(
+            orden_id=orden_id,
+            detalle_id=detalle_id,
+            solicitante=solicitantes.get(solicitante_id),
+            estado=estado,
+            retiro_pactado=retiro,
+            devolucion_pactada=devolucion,
+        )
+        for orden_id, detalle_id, solicitante_id, estado, retiro, devolucion in filas
+    ]
+
+
 # ── Crear orden (POST /ordenes) ──────────────────────────────────────────────
 
 
@@ -325,7 +788,10 @@ async def crear_orden(db: AsyncSession, actor: Usuario, payload: OrdenPedidoCrea
             422, "ASIGNATURA_REQUERIDA", "Indicá la asignatura para la que pedís el equipo."
         )
     sede = actor.sede
-    assert sede is not None, "Solo estudiantes y docentes crean órdenes, y tienen sede"
+    if sede is None:  # no debería pasar: el CHECK sede_segun_rol de usuarios lo impide
+        raise AppError(
+            403, "ROL_NO_AUTORIZADO", "Tu cuenta no tiene una sede asignada para pedir equipos."
+        )
     retiro, devolucion = payload.retiro, payload.devolucion
 
     # 2. Parámetros (RN-L28). Horario global hasta que config publique el de cada sede (K10).
@@ -393,4 +859,3 @@ async def crear_orden(db: AsyncSession, actor: Usuario, payload: OrdenPedidoCrea
         raise
     await db.refresh(orden)  # fecha_solicitud la pone la base
     return orden
-

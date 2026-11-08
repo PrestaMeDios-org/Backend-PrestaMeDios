@@ -33,7 +33,12 @@ from pydantic import (
 )
 
 from app.core.enums import SedeEnum
-from app.modules.loans.enums import EstadoDetalleEnum, EstadoOrdenEnum
+from app.modules.loans.enums import (
+    ESTADOS_DETALLE_EN_CURSO,
+    EstadoDetalleEnum,
+    EstadoOrdenEnum,
+    SituacionOrdenEnum,
+)
 
 _INPUT_CONFIG = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -132,6 +137,16 @@ class OrdenPedidoCreate(BaseModel):
         return self
 
 
+class SolicitanteResumen(BaseModel):
+    """Identidad mínima del solicitante (P6): nunca DNI, email ni teléfono."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(examples=[7])
+    nombre: str = Field(examples=["Ana"])
+    apellido: str = Field(examples=["Pérez"])
+
+
 class OrdenPedidoResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -144,6 +159,16 @@ class OrdenPedidoResponse(BaseModel):
     observacion_docente: str | None = None
     motivo_resolucion: str | None = None
     es_renovado: bool = False
+    resuelto_en: AwareDatetime | None = Field(
+        default=None, description="Cuándo se aprobó, rechazó o canceló. Vacío si sigue pendiente."
+    )
+    solicitante: SolicitanteResumen | None = Field(
+        default=None,
+        description=(
+            "Nombre y apellido del solicitante. Solo se completa para administradores; "
+            "el dueño de la orden recibe null."
+        ),
+    )
     detalles: list[DetallePrestamoResponse] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]
@@ -156,10 +181,33 @@ class OrdenPedidoResponse(BaseModel):
             for d in self.detalles
         )
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def situacion(self) -> SituacionOrdenEnum:
+        """Derivada (RN-L31): en curso si alguna línea está pendiente, reservada o entregada."""
+        if any(d.estado in ESTADOS_DETALLE_EN_CURSO for d in self.detalles):
+            return SituacionOrdenEnum.EN_CURSO
+        return SituacionOrdenEnum.FINALIZADA
+
 
 # ---------------------------------------------------------------------------
 # Bandeja administrativa
 # ---------------------------------------------------------------------------
+class LineaUnidadesLibresResponse(BaseModel):
+    """Unidades que se pueden asignar a una línea al aprobar (RN-L10, RN-L12, AC-L58).
+
+    Solo ids: para mostrar el código de inventario, la interfaz los cruza con el stock
+    de `inventory` (plan §8.7, Q1).
+    """
+
+    detalle_id: int = Field(examples=[31])
+    equipamiento_id: int = Field(examples=[12])
+    unidades: list[int] = Field(
+        description="Ids de las unidades libres para el período de la línea.",
+        examples=[[101, 104]],
+    )
+
+
 class AsignacionUnidad(BaseModel):
     """El administrador asigna una unidad física concreta a una línea."""
 

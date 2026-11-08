@@ -9,15 +9,19 @@ Primera versión: sin aval (la alta gama responde `422 AVAL_REQUERIDO`) y sin re
 """
 
 from datetime import datetime, time
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
 
 from app.core.enums import RolUsuario, SedeEnum
+from app.core.errors import AppError
 from app.core.settings import ZONA_HORARIA_LAB
 from app.modules.inventory.enums import EstadoUnidadEnum as E
 from app.modules.loans.enums import EstadoDetalleEnum as D
+from app.modules.loans import service
 from app.modules.loans.models import DetallePrestamo, OrdenPedido
+from app.modules.loans.schemas import OrdenPedidoCreate
 from tests.conftest import auth, dia
 
 pytestmark = pytest.mark.integracion
@@ -74,6 +78,8 @@ async def test_crea_la_orden_pendiente_con_sus_lineas(client, db, crear_usuario,
     assert orden["sede"] == SedeEnum.RIO_GRANDE.value
     assert orden["asignatura_id"] == 7
     assert orden["es_renovado"] is False
+    assert orden["situacion"] == "en_curso"  # AC-L61
+    assert orden["resuelto_en"] is None
     assert len(orden["detalles"]) == 2
     for linea in orden["detalles"]:
         assert linea["equipamiento_id"] == camara.id
@@ -123,6 +129,16 @@ async def test_la_renovacion_todavia_no_esta_disponible(client, crear_usuario, e
     r = await client.post(URL, json=_pedido(notebook, renueva_detalle_id=1), headers=auth(ana))
     assert r.status_code == 501
     assert r.json()["code"] == "NO_IMPLEMENTADO"
+
+
+async def test_un_solicitante_sin_sede_recibe_403_y_no_un_500():
+    # O2: antes era un `assert`, que con `python -O` desaparece. La base ya impide este
+    # caso (CHECK sede_segun_rol), así que se prueba el servicio con un actor armado a mano.
+    actor = SimpleNamespace(id=1, rol=ESTUDIANTE, sede=None)
+    pedido = OrdenPedidoCreate.model_validate(_pedido(SimpleNamespace(id=1)))
+    with pytest.raises(AppError) as exc:
+        await service.crear_orden(None, actor, pedido)  # falla antes de tocar la base
+    assert (exc.value.status_code, exc.value.code) == (403, "ROL_NO_AUTORIZADO")
 
 
 # ── Horario ──────────────────────────────────────────────────────────────────

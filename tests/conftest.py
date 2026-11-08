@@ -53,7 +53,8 @@ PASSWORD = "Camara2026!"
 _TABLAS = (
     "notificaciones, comunicados, "  # SPEC-06 (conformidad del Perfil 1, T-01)
     "parametros_globales_historial, parametros_globales, usuarios_historial_estado, "
-    "reservas_espacios, bloqueos_espacios, espacios, detalles_prestamo, ordenes_pedido, "
+    "reservas_espacios, bloqueos_espacios, espacios, ordenes_historial_estado, "
+    "detalles_prestamo, ordenes_pedido, "
     "unidades_fisicas, equipamientos, categorias, usuarios"
 )
 

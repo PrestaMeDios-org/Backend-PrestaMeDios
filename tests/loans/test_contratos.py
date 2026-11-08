@@ -1,9 +1,8 @@
 """Contrato HTTP de `loans` en la Fase 0 (SPEC-05 §14; AC-L52, AC-L53).
 
-Los endpoints exigen sesión y rol. Los que todavía no tienen lógica (bandeja y
-cambio de estado) responden 501 ``NO_IMPLEMENTADO``. Crear orden se prueba en
-``test_crear_orden.py``. Estos tests se
-reemplazan por los de cada criterio a medida que se implementa cada fase.
+Los endpoints exigen sesión y rol. Crear orden se prueba en ``test_crear_orden.py``, la
+bandeja en ``test_bandeja.py`` y el rechazo y la cancelación en
+``test_rechazar_cancelar.py``.
 """
 
 import pytest
@@ -33,13 +32,7 @@ RUTAS = [
     ("GET", "/ordenes", None),
     ("GET", "/ordenes/1", None),
     ("PATCH", "/ordenes/1/estado", RECHAZO),
-]
-
-# (rol, método, ruta, cuerpo) con permiso: llegan al placeholder
-PERMITIDAS = [
-    (A, "GET", "/ordenes", None),
-    (S, "GET", "/ordenes", None),
-    (A, "PATCH", "/ordenes/1/estado", RECHAZO),
+    ("GET", "/ordenes/1/unidades-libres", None),
 ]
 
 # (rol, método, ruta, cuerpo) sin permiso según la matriz del spec §4
@@ -50,6 +43,8 @@ PROHIBIDAS = [
     (S, "GET", "/ordenes/mias", None),
     (E, "GET", "/ordenes", None),
     (D, "GET", "/ordenes", None),
+    (E, "PATCH", "/ordenes/1/estado", RECHAZO),  # AC-L29
+    (D, "PATCH", "/ordenes/1/estado", RECHAZO),
 ]
 
 
@@ -64,16 +59,6 @@ async def test_rol_sin_permiso_responde_403(client, crear_usuario, rol, metodo, 
     usuario = await crear_usuario(rol)  # AC-L13, AC-L17
     r = await client.request(metodo, f"{BASE}{ruta}", json=cuerpo, headers=auth(usuario))
     assert r.status_code == 403
-
-
-@pytest.mark.parametrize(("rol", "metodo", "ruta", "cuerpo"), PERMITIDAS)
-async def test_con_permiso_responde_501_no_implementado(
-    client, crear_usuario, rol, metodo, ruta, cuerpo
-):  # AC-L52, AC-L53
-    usuario = await crear_usuario(rol)
-    r = await client.request(metodo, f"{BASE}{ruta}", json=cuerpo, headers=auth(usuario))
-    assert r.status_code == 501
-    assert r.json()["code"] == "NO_IMPLEMENTADO"
 
 
 @pytest.mark.parametrize(
@@ -106,5 +91,6 @@ async def test_openapi_publica_las_rutas_del_spec(client):
     assert set(paths[f"{BASE}/ordenes/mias"]) == {"get"}
     assert set(paths[f"{BASE}/ordenes/{{orden_id}}"]) == {"get"}
     assert set(paths[f"{BASE}/ordenes/{{orden_id}}/estado"]) == {"patch"}
+    assert set(paths[f"{BASE}/ordenes/{{orden_id}}/unidades-libres"]) == {"get"}
     assert f"{BASE}/ordenes/{{orden_id}}/resolucion" not in paths
     assert f"{BASE}/ordenes/{{orden_id}}/cancelacion" not in paths

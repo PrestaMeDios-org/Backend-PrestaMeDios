@@ -109,6 +109,8 @@ async def test_detalle_de_una_orden_propia(client, db, crear_usuario):  # AC-L16
     assert cuerpo["estado"] == "pendiente"
     assert cuerpo["detalles"] == []
     assert cuerpo["demorado"] is False
+    assert cuerpo["resuelto_en"] is None
+    assert cuerpo["solicitante"] is None  # el dueño no recibe su propio resumen (T2.2)
 
 
 async def test_detalle_de_una_orden_ajena_responde_404(client, db, crear_usuario):  # AC-L16

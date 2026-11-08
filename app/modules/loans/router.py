@@ -17,12 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, require_roles
 from app.core.enums import RolUsuario, SedeEnum
-from app.core.errors import AppError, error_responses
+from app.core.errors import error_responses
 from app.database import get_db
 from app.modules.loans import service
 from app.modules.loans.enums import EstadoOrdenEnum
 from app.modules.loans.models import OrdenPedido
 from app.modules.loans.schemas import (
+    LineaUnidadesLibresResponse,
     OrdenPedidoCreate,
     OrdenPedidoEstadoUpdate,
     OrdenPedidoResponse,
@@ -34,14 +35,6 @@ router = APIRouter()
 
 _solo_solicitantes = require_roles(RolUsuario.ESTUDIANTE, RolUsuario.DOCENTE)
 _solo_admins = require_roles(RolUsuario.ADMIN_LOCAL, RolUsuario.SUPERADMIN)
-
-
-def _pendiente() -> AppError:
-    return AppError(
-        501,
-        "NO_IMPLEMENTADO",
-        "Endpoint definido por contrato; lógica pendiente.",
-    )
 
 
 # ── Reglas operativas ────────────────────────────────────────────────────────
@@ -110,15 +103,22 @@ async def listar_mis_ordenes(
     responses=error_responses(401, 403),
 )
 async def listar_bandeja(
-    estado: EstadoOrdenEnum | None = Query(default=EstadoOrdenEnum.PENDIENTE),
-    sede: SedeEnum | None = Query(default=None, description="Solo SUPERADMIN."),
+    estado: EstadoOrdenEnum = Query(default=EstadoOrdenEnum.PENDIENTE),
+    sede: SedeEnum | None = Query(
+        default=None,
+        description="Solo SUPERADMIN. Un ADMIN_LOCAL que pide otra sede recibe 403.",
+    ),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     actor: Usuario = Depends(_solo_admins),
     db: AsyncSession = Depends(get_db),
 ) -> list[OrdenPedidoResponse]:
-    """El admin local ve solo su sede; el superadmin ve ambas o la filtrada (PRE-15)."""
-    raise _pendiente()
+    """El admin local ve solo su sede; el superadmin ve ambas o la filtrada (PRE-15).
+
+    Por defecto, las pendientes, de la más vieja a la más nueva, con nombre y apellido
+    del solicitante (P6).
+    """
+    return await service.listar_bandeja(db, actor, estado, sede, limit, offset)
 
 
 @router.get(
@@ -131,9 +131,33 @@ async def obtener_orden(
     orden_id: int,
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> OrdenPedido:
-    """Hoy solo lo ve el dueño; sede y docente se agregan en las fases 2 y 4."""
+) -> OrdenPedidoResponse:
+    """Lo ven el dueño y los administradores con jurisdicción sobre la sede de la orden.
+
+    Para los administradores incluye nombre y apellido del solicitante (P6). Fuera de
+    alcance responde 404, nunca 403. El docente de la asignatura llega en la Fase 4.
+    """
     return await service.obtener_orden(db, actor, orden_id)
+
+
+@router.get(
+    "/ordenes/{orden_id}/unidades-libres",
+    response_model=list[LineaUnidadesLibresResponse],
+    summary="Unidades libres por línea, para asignar al aprobar",
+    responses=error_responses(401, 403, 404),
+)
+async def unidades_libres_de_orden(
+    orden_id: int,
+    actor: Usuario = Depends(_solo_admins),
+    db: AsyncSession = Depends(get_db),
+) -> list[LineaUnidadesLibresResponse]:
+    """Por cada línea, las unidades del modelo en la sede de la orden que están
+    ``disponible`` y sin otra reserva que se solape con su período (PRE-10, RN-L12).
+
+    Devuelve solo ids; el código de inventario sale del stock de ``inventory``. Fuera
+    de la jurisdicción del administrador responde 404.
+    """
+    return await service.unidades_libres_de_orden(db, actor, orden_id)
 
 
 @router.patch(
@@ -153,6 +177,7 @@ async def cambiar_estado_orden(
     Al aprobar se asigna una unidad por línea y se puede ajustar el horario. El
     administrador cancela únicamente órdenes ``aprobada`` de su sede, con motivo
     (libera las unidades, PRE-17). El permiso depende del rol y del estado actual,
-    por eso lo decide el servicio.
+    por eso lo decide el servicio. El ajuste horario y la cancelación del
+    administrador todavía responden ``501``.
     """
-    raise _pendiente()
+    return await service.cambiar_estado_orden(db, actor, orden_id, payload)
