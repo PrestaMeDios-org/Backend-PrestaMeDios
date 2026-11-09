@@ -177,7 +177,6 @@ async def cambiar_estado_orden(
     Al aprobar se asigna una unidad por línea y se puede ajustar el horario. El
     administrador cancela únicamente órdenes ``aprobada`` de su sede, con motivo
     (libera las unidades, PRE-17). El permiso depende del rol y del estado actual,
-    por eso lo decide el servicio. El ajuste horario y la cancelación del
-    administrador todavía responden ``501``.
+    por eso lo decide el servicio.
     """
     return await service.cambiar_estado_orden(db, actor, orden_id, payload)
