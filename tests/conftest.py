@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-no-usar-en-produccion-0123456789")
+# Los tests nunca mandan correos reales, aunque el `.env` diga `smtp` (SPEC-03 RN-76).
+os.environ["EMAIL_BACKEND"] = "memoria"
 
 import httpx  # noqa: E402
 from sqlalchemy import text  # noqa: E402
@@ -29,6 +31,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import NullPool  # noqa: E402
 
+from app.core.email import CorreoEnviado, bandeja_memoria, vaciar_bandeja_memoria  # noqa: E402
 from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum  # noqa: E402
 from app.core.security import crear_access_token, hash_password  # noqa: E402
 from app.database import Base, get_db  # noqa: E402
@@ -53,11 +56,24 @@ PASSWORD = "Camara2026!"
 
 _TABLAS = (
     "notificaciones, comunicados, "  # SPEC-06 (conformidad del Perfil 1, T-01)
+    "intentos_recuperacion, "  # SPEC-03 B1: sin FK, el CASCADE de `usuarios` no la vacía
     "parametros_globales_historial, parametros_globales, usuarios_historial_estado, "
     "reservas_espacios, bloqueos_espacios, espacios, ordenes_historial_estado, "
     "detalles_prestamo, ordenes_pedido, "
     "unidades_fisicas, equipamientos, categorias, usuarios"
 )
+
+
+@pytest.fixture(autouse=True)
+def _bandeja_vacia() -> None:
+    """Cada test empieza con la bandeja del backend ``memoria`` vacía (RN-76)."""
+    vaciar_bandeja_memoria()
+
+
+@pytest.fixture
+def correos() -> list[CorreoEnviado]:
+    """Correos enviados durante el test (backend ``memoria``), en orden."""
+    return bandeja_memoria()
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

@@ -5,7 +5,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
-from app.modules.users.schemas import CambioEstadoRequest, RegistroRequest, UsuarioAdminCreate
+from app.modules.users.schemas import (
+    CambioEstadoRequest,
+    ConfirmacionRecuperacion,
+    RegistroRequest,
+    SolicitudRecuperacion,
+    UsuarioAdminCreate,
+)
 
 BASE = {
     "email": "lucia.perez@untdf.edu.ar",
@@ -116,3 +122,24 @@ class TestCambioEstadoRequest:
                 motivo="Demora",
                 suspendido_hasta=datetime.now() + timedelta(days=1),
             )
+
+
+class TestRecuperacion:  # SPEC-03 §5.3
+    def test_email_normalizado(self):  # EC-36
+        assert SolicitudRecuperacion(email=" Ana@UNTDF.edu.ar ").email == "ana@untdf.edu.ar"
+
+    @pytest.mark.parametrize("extra", [{"rol": "SUPERADMIN"}, {"token": "x"}])
+    def test_campo_extra_rechazado(self, extra):  # AC-79
+        with pytest.raises(ValidationError):
+            SolicitudRecuperacion(email="ana@untdf.edu.ar", **extra)
+
+    @pytest.mark.parametrize("password", ["corta1", "solamenteletras", "1234567890"])
+    def test_politica_de_password(self, password):  # AC-77, RN-03
+        with pytest.raises(ValidationError):
+            ConfirmacionRecuperacion(token="t" * 43, password_nueva=password)
+
+    def test_token_con_largo_razonable(self):
+        with pytest.raises(ValidationError):
+            ConfirmacionRecuperacion(token="corto", password_nueva="Camara2026!")
+        assert ConfirmacionRecuperacion(token="t" * 43, password_nueva="Camara2026!").token
+
