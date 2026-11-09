@@ -98,7 +98,8 @@ Definidas en `.env` (ver [`.env.example`](.env.example)). **Nunca versionar `.en
 | --- | --- | --- | --- |
 | `DATABASE_URL` | Sí | — | `postgresql+asyncpg://usuario:clave@localhost:5432/prestamedios` |
 | `JWT_SECRET_KEY` | Sí | — | Secreto de firma de tokens (≥ 32 caracteres) |
-| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | No | `60` | Vida del token de acceso |
+| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | No | `30` | Vida del token de acceso; el frontend lo renueva mientras haya actividad |
+| `JWT_SESION_MAX_HORAS` | No | `8` | Tope de una sesión desde el login: pasado ese tiempo no se renueva y hay que volver a iniciar sesión |
 | `CORS_ORIGINS` | No | `http://localhost:8443` | Orígenes permitidos, separados por coma |
 | `TEST_DATABASE_URL` | Sólo tests | — | Base dedicada; su nombre debe contener `test` |
 | `BOOTSTRAP_SUPERADMIN_PASSWORD` | No | — | Contraseña para el CLI sin prompt interactivo |
@@ -140,6 +141,8 @@ curl localhost:8000/api/v1/auth/me -H "Authorization: Bearer <access_token>"
 
 En Swagger (`/docs`) usar el botón **Authorize** y pegar el `access_token`.
 
+**Renovación de la sesión.** El token dura `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` (30) y lleva el claim `auth_time` con el momento del login. Mientras el usuario trabaja, el frontend lo cambia por uno nuevo con `POST /api/v1/auth/renovar`, que conserva `auth_time`; pasadas `JWT_SESION_MAX_HORAS` (8) desde el login responde `401 TOKEN_SESION_MAXIMA`. Sin actividad, el token vence y se vuelve al login. No hay refresh token ni cookies: el token sigue en `sessionStorage` y cerrar la pestaña cierra la sesión (ADR-015). `POST /api/v1/auth/me/sesiones/cerrar` cierra las sesiones abiertas en otras computadoras.
+
 **Recuperar la contraseña (USR-02).** `POST /api/v1/auth/recuperacion` con `{"email"}` responde siempre el mismo `202`, exista o no la cuenta, y sólo manda el correo a cuentas activas. El enlace es `{FRONTEND_URL}/#/restablecer?token=…` (el token va en el fragmento, que el navegador no manda al servidor) y vence a los `RECUPERACION_VIGENCIA_MINUTOS`. El frontend manda el token y la contraseña nueva a `POST /api/v1/auth/recuperacion/confirmar`; eso cierra todas las sesiones y no inicia una nueva.
 
 **Correo en desarrollo (Mailpit).** Mailpit recibe los correos sin mandarlos a nadie:
@@ -164,6 +167,8 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | | `POST /api/v1/auth/login` | Inicio de sesión (JWT) |
 | | `GET /api/v1/auth/me` · `PATCH /api/v1/auth/me` | Perfil propio; editar teléfono y email |
 | | `POST /api/v1/auth/me/password` | Cambiar la contraseña (emite un token nuevo) |
+| | `POST /api/v1/auth/renovar` | Cambiar el token vigente por uno nuevo, sin pasar el tope de `JWT_SESION_MAX_HORAS` desde el login |
+| | `POST /api/v1/auth/me/sesiones/cerrar` | Cerrar todas mis sesiones (devuelve un token nuevo para la pestaña actual) |
 | | `POST /api/v1/auth/recuperacion` · `POST /api/v1/auth/recuperacion/confirmar` | Pedir el enlace para restablecer la contraseña y confirmarlo (públicos) |
 | | `PUT /api/v1/auth/me/foto` · `DELETE /api/v1/auth/me/foto` | Subir, reemplazar o quitar la foto de perfil (multipart, campo `archivo`; JPEG, PNG o WebP) |
 | Usuarios | `GET /api/v1/users` | Directorio con filtros y aislamiento de sede |
