@@ -1,10 +1,10 @@
-"""Aprobar una orden (SPEC-05 Fase 2, T2.5 y T2.7).
+"""Aprobar una orden (SPEC-05 Fase 2, T2.5, T2.7 y T2.10).
 
 - `GET /ordenes/{id}/unidades-libres` (RN-L12; AC-L47, AC-L58): por cada línea, las
   unidades del modelo en la sede de la orden que están `disponible` y sin otra línea
   `reservado` o `entregado` que se solape con su período.
-- `PATCH /ordenes/{id}/estado` con `aprobada` (RN-L11…L14, RN-L27; AC-L19…L23, L26,
-  L30, L47, L53): una unidad por línea, todo o nada.
+- `PATCH /ordenes/{id}/estado` con `aprobada` (RN-L11…L14, RN-L18, RN-L27; AC-L19…L23,
+  L25, L26, L30, L47, L53): una unidad por línea, todo o nada, con ajuste horario opcional.
 
 Las órdenes de estos tests piden de `RETIRO` (dentro de una semana, 10:00) a
 `DEVOLUCION` (dos días después, 15:00). `crear_linea(..., retiro=r)` ocupa de `r` a dos
@@ -476,25 +476,141 @@ async def test_no_se_aprueba_una_orden_con_el_retiro_vencido(
     await _sigue_pendiente(db, orden.id)
 
 
-async def test_el_ajuste_horario_todavia_responde_501(
+def _ajuste(retiro: datetime, devolucion: datetime) -> dict:
+    return {"nuevo_retiro": retiro.isoformat(), "nueva_devolucion": devolucion.isoformat()}
+
+
+def _a_las(dia: datetime, hora: int) -> datetime:
+    return dia.replace(hour=hora, minute=0, second=0, microsecond=0)
+
+
+async def test_el_ajuste_horario_cambia_todas_las_lineas(
     client, db, crear_usuario, crear_equipamiento, crear_orden
-):  # Se reemplaza en T2.10
+):  # AC-L25, RN-L18, PRE-18
+    camara = await crear_equipamiento(estados=(U.DISPONIBLE,) * 2)
+    orden = await crear_orden(camara, camara)
+    admin = await crear_usuario(A, USH)
+    retiro = _a_las(RETIRO + timedelta(days=1), 11)
+    devolucion = _a_las(retiro + timedelta(days=1), 14)
+
+    r = await _aprobar(client, admin, orden, _ids(camara), **_ajuste(retiro, devolucion))
+
+    assert r.status_code == 200, r.json()
+    en_base = await _en_base(db, orden.id)
+    assert en_base.estado is EstadoOrdenEnum.APROBADA
+    for linea in en_base.detalles:
+        assert linea.retiro_pactado == retiro
+        assert linea.devolucion_pactada == devolucion
+        assert linea.fin_ocupacion == devolucion
+
+
+@pytest.mark.parametrize(("hora_retiro", "hora_devolucion"), [(8, 14), (10, 17)])
+async def test_el_ajuste_fuera_de_la_franja_responde_422(
+    client, db, crear_usuario, crear_equipamiento, crear_orden, hora_retiro, hora_devolucion
+):  # AC-L25, RN-L04: la franja sembrada es de 09:00 a 16:00
     camara = await crear_equipamiento()
     orden = await crear_orden(camara)
     admin = await crear_usuario(A, USH)
-    nuevo = RETIRO + timedelta(days=1)
+    retiro = _a_las(RETIRO, hora_retiro)
+    devolucion = _a_las(RETIRO + timedelta(days=1), hora_devolucion)
+
+    r = await _aprobar(client, admin, orden, _ids(camara), **_ajuste(retiro, devolucion))
+
+    assert r.status_code == 422
+    assert _codigo(r) == "FRANJA_FUERA_DE_HORARIO"
+    await _sigue_pendiente(db, orden.id)
+
+
+async def test_el_ajuste_que_supera_el_plazo_responde_422(
+    client, db, crear_usuario, crear_equipamiento, crear_orden
+):  # AC-L25, RN-L06: el ítem admite 4 días
+    camara = await crear_equipamiento(max_dias_prestamo=4)
+    orden = await crear_orden(camara)
+    admin = await crear_usuario(A, USH)
+    devolucion = RETIRO + timedelta(days=6)
+
+    r = await _aprobar(client, admin, orden, _ids(camara), **_ajuste(RETIRO, devolucion))
+
+    assert r.status_code == 422
+    assert _codigo(r) == "LIMITE_DIAS_EXCEDIDO"
+    await _sigue_pendiente(db, orden.id)
+
+
+async def test_el_ajuste_con_un_retiro_pasado_responde_422(
+    client, db, crear_usuario, crear_equipamiento, crear_orden
+):  # RN-L18: el retiro nuevo tiene que ser futuro
+    camara = await crear_equipamiento()
+    orden = await crear_orden(camara)
+    admin = await crear_usuario(A, USH)
+    retiro = ahora_lab() - timedelta(hours=1)
 
     r = await _aprobar(
-        client,
-        admin,
-        orden,
-        _ids(camara),
-        nuevo_retiro=nuevo.isoformat(),
-        nueva_devolucion=(nuevo + timedelta(days=1)).isoformat(),
+        client, admin, orden, _ids(camara), **_ajuste(retiro, retiro + timedelta(hours=2))
     )
 
-    assert r.status_code == 501
+    assert r.status_code == 422
+    assert _codigo(r) == "RETIRO_VENCIDO"
+    assert r.json()["campo"] == "nuevo_retiro"
     await _sigue_pendiente(db, orden.id)
+
+
+async def test_una_orden_con_el_retiro_vencido_se_aprueba_ajustando_el_horario(
+    client, crear_usuario, crear_equipamiento, crear_orden
+):  # AC-L30, EC-L05
+    camara = await crear_equipamiento()
+    orden = await crear_orden(camara, retiro=ahora_lab() - timedelta(hours=1))
+    admin = await crear_usuario(A, USH)
+
+    r = await _aprobar(client, admin, orden, _ids(camara), **_ajuste(RETIRO, DEVOLUCION))
+
+    assert r.status_code == 200, r.json()
+
+
+async def test_el_ajuste_no_exige_la_anticipacion_minima(
+    client, set_parametro, crear_usuario, crear_equipamiento, crear_orden
+):  # RN-L18: el administrador acuerda el horario con el solicitante
+    await set_parametro("solicitud.anticipacion_min_horas", 168)
+    camara = await crear_equipamiento()
+    orden = await crear_orden(camara)
+    admin = await crear_usuario(A, USH)
+    retiro = _a_las(ahora_lab() + timedelta(days=1), 10)  # menos de 168 horas
+
+    r = await _aprobar(client, admin, orden, _ids(camara), **_ajuste(retiro, _a_las(retiro, 15)))
+
+    assert r.status_code == 200, r.json()
+
+
+async def test_el_ajuste_se_controla_contra_las_reservas_del_periodo_nuevo(
+    client, db, crear_usuario, crear_equipamiento, crear_linea, crear_orden
+):  # AC-L23, RN-L12: el EXCLUDE mira el período ajustado, no el pedido
+    camara = await crear_equipamiento()
+    await crear_linea(
+        camara, camara.unidades[0], EstadoDetalleEnum.RESERVADO, retiro=EN_OTRAS_FECHAS
+    )
+    orden = await crear_orden(camara)  # el período pedido está libre
+    admin = await crear_usuario(A, USH)
+    ajuste = _ajuste(EN_OTRAS_FECHAS, EN_OTRAS_FECHAS + timedelta(days=1, hours=5))
+
+    r = await _aprobar(client, admin, orden, _ids(camara), **ajuste)
+
+    assert r.status_code == 409
+    assert _codigo(r) == "UNIDAD_NO_DISPONIBLE"
+    await _sigue_pendiente(db, orden.id)
+    assert (await _en_base(db, orden.id)).detalles[0].retiro_pactado == RETIRO
+
+
+async def test_el_ajuste_puede_esquivar_una_reserva_que_se_solapaba(
+    client, crear_usuario, crear_equipamiento, crear_linea, crear_orden
+):  # RN-L18: mover el horario a fechas libres permite aprobar
+    camara = await crear_equipamiento()
+    await crear_linea(camara, camara.unidades[0], EstadoDetalleEnum.RESERVADO, retiro=SOLAPADO)
+    orden = await crear_orden(camara)
+    admin = await crear_usuario(A, USH)
+    ajuste = _ajuste(EN_OTRAS_FECHAS, EN_OTRAS_FECHAS + timedelta(days=1, hours=5))
+
+    r = await _aprobar(client, admin, orden, _ids(camara), **ajuste)
+
+    assert r.status_code == 200, r.json()
 
 
 async def test_una_unidad_con_una_reserva_que_se_solapa_responde_409(

@@ -257,27 +257,66 @@ def _unidad_no_asignable(detalle_id: int, unidad_id: int) -> AppError:
     )
 
 
+async def _validar_ajuste_horario(
+    db: AsyncSession, orden: OrdenPedido, retiro: datetime, devolucion: datetime
+) -> None:
+    """RN-L18 (PRE-18, AC-L25): el horario nuevo cumple la franja y el plazo de cada línea.
+
+    - El retiro nuevo tiene que ser futuro (``422 RETIRO_VENCIDO`` con ``campo``). No se
+      exige la anticipación mínima: el administrador acuerda el horario con el solicitante.
+    - Franja (RN-L04) y plazo por línea (RN-L06) con los parámetros vigentes, que pueden
+      haber cambiado desde el pedido (EC-L11).
+    - Que la devolución sea posterior al retiro ya lo valida el esquema.
+    """
+    if retiro <= ahora_lab():
+        raise AppError(
+            422,
+            "RETIRO_VENCIDO",
+            "El nuevo horario de retiro tiene que ser posterior a este momento.",
+            campo="nuevo_retiro",
+        )
+    _validar_franja(
+        retiro, devolucion, await _hora(db, "horario.apertura"), await _hora(db, "horario.cierre")
+    )
+    max_general = await _entero(db, "prestamo.general.max_dias")
+    max_notebook = await _entero(db, "prestamo.notebook.max_dias")
+    modelos = list(dict.fromkeys(d.equipamiento_id for d in orden.detalles))
+    datos = await datos_equipamiento_por_ids(db, modelos)
+    for equipamiento_id in modelos:
+        item = datos.get(equipamiento_id)
+        if item is None:  # no debería pasar: la FK lo impide
+            continue
+        limite = _limite_dias(item.es_notebook, max_general, max_notebook, item.max_dias_prestamo)
+        _validar_plazo(retiro, devolucion, limite, equipamiento_id)
+
+
 async def _aprobar(
     db: AsyncSession, orden: OrdenPedido, actor: Usuario, payload: OrdenPedidoEstadoUpdate
 ) -> OrdenHistorialEstado:
     """Aprobación de una orden ``pendiente`` ya bloqueada (RN-L11…L13, RN-L27, plan §8.5.5).
 
-    1. Sin ajuste horario, el retiro tiene que ser futuro (``422 RETIRO_VENCIDO``). No se
-       revalidan plazos ni franja (EC-L11). El ajuste horario (T2.10) todavía responde 501.
+    1. Sin ajuste horario, el retiro tiene que ser futuro (``422 RETIRO_VENCIDO``) y no se
+       revalidan plazos ni franja (EC-L11). Con ajuste (``nuevo_retiro`` y
+       ``nueva_devolucion``), se valida el horario nuevo (``_validar_ajuste_horario``) y
+       se aprueba aunque el retiro original haya vencido (EC-L05).
     2. Exactamente una asignación por línea, sin líneas ajenas ni unidades repetidas
        (``422 ASIGNACIONES_INVALIDAS``, AC-L22).
     3. Cada unidad se bloquea en orden ascendente de id (RN-L14) y tiene que ser del
        modelo de la línea, de la sede de la orden, ``disponible`` y de un ítem activo
        (``422 UNIDAD_NO_ASIGNABLE``, AC-L20, L21, L26; EC-L08). ``loans`` solo lee la
        unidad: su estado es de ``inventory`` (DT-20).
-    4. Líneas ``reservado`` con su unidad. El solapamiento con otra reserva lo rechaza la
-       base al hacer ``commit`` (``409 UNIDAD_NO_DISPONIBLE``, lo traduce quien llama).
+    4. Líneas ``reservado`` con su unidad y, si hubo ajuste, con las fechas nuevas en todas
+       las líneas y ``fin_ocupacion`` igual a la devolución nueva (RN-L18). El solapamiento
+       con otra reserva lo rechaza la base al hacer ``commit`` con el período definitivo
+       (``409 UNIDAD_NO_DISPONIBLE``, lo traduce quien llama).
     """
-    # 1. Retiro vencido (RN-L27, AC-L30).
-    if payload.nuevo_retiro is not None:
-        raise AppError(501, "NO_IMPLEMENTADO", "El ajuste horario todavía no está disponible.")
+    # 1. Ajuste horario (RN-L18) o retiro vencido (RN-L27, AC-L30).
+    ajuste = None
+    if payload.nuevo_retiro is not None and payload.nueva_devolucion is not None:
+        ajuste = (payload.nuevo_retiro, payload.nueva_devolucion)
+        await _validar_ajuste_horario(db, orden, *ajuste)
     retiro = min((d.retiro_pactado for d in orden.detalles), default=None)
-    if retiro is not None and retiro <= ahora_lab():
+    if ajuste is None and retiro is not None and retiro <= ahora_lab():
         raise AppError(
             422,
             "RETIRO_VENCIDO",
@@ -304,9 +343,13 @@ async def _aprobar(
         ):
             raise _unidad_no_asignable(detalle_id, unidad_id)
 
-    # 4. Aplicar (AC-L19).
+    # 4. Aplicar (AC-L19, AC-L25).
     for detalle_id, unidad_id in unidad_de.items():
         lineas[detalle_id].unidad_fisica_id = unidad_id
+        if ajuste is not None:
+            linea = lineas[detalle_id]
+            linea.retiro_pactado, linea.devolucion_pactada = ajuste
+            linea.fin_ocupacion = ajuste[1]
     return _resolver(
         orden,
         actor,
@@ -333,8 +376,9 @@ async def cambiar_estado_orden(
     - ``aprobada``: administrador con jurisdicción, orden ``pendiente``, una unidad por
       línea (``_aprobar``). Un solapamiento que rechaza la base responde
       ``409 UNIDAD_NO_DISPONIBLE`` sin cambios parciales (RN-L13).
-    - El ajuste horario (T2.10) y la cancelación de una ``aprobada`` por el
-      administrador (T2.9) todavía responden ``501``.
+    - ``cancelada`` por el administrador: solo una orden ``aprobada`` sin líneas
+      ``entregado`` (si no, ``409``), con motivo (``422 MOTIVO_REQUERIDO``). Las líneas
+      ``reservado`` pasan a ``cancelado`` y liberan su unidad (AC-L33, AC-L34).
     """
     pedido = payload.estado
     # 1. Aprobar y rechazar son administrativos, sea o no el dueño (AC-L29).
@@ -384,11 +428,19 @@ async def cambiar_estado_orden(
                 lineas_desde=(EstadoDetalleEnum.PENDIENTE,),
             )
         else:
-            # Cancelación del administrador: solo una aprobada (RN-L16); llega en T2.9.
-            if actual is not EstadoOrdenEnum.APROBADA:
+            # Cancelación del administrador (RN-L16, AC-L33, AC-L34): solo una aprobada,
+            # sin entregas, con motivo. Las líneas reservado liberan su unidad.
+            if actual is not EstadoOrdenEnum.APROBADA or any(
+                d.estado is EstadoDetalleEnum.ENTREGADO for d in orden.detalles
+            ):
                 raise transicion_invalida(orden)
-            raise AppError(
-                501, "NO_IMPLEMENTADO", "Cancelar una orden aprobada todavía no está disponible."
+            historial = _resolver(
+                orden,
+                actor,
+                EstadoOrdenEnum.CANCELADA,
+                EstadoDetalleEnum.CANCELADO,
+                _motivo_requerido(payload.motivo),
+                lineas_desde=(EstadoDetalleEnum.RESERVADO,),
             )
 
         # 5. Aplicar en una sola transacción: todo o nada (RN-L13).

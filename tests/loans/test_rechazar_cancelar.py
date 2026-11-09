@@ -1,10 +1,10 @@
-"""Rechazar y cancelar la propia orden (SPEC-05 Fase 2, T2.6; AC-L27, L28, L29, L31, L32).
+"""Rechazar y cancelar órdenes (SPEC-05 Fase 2, T2.6 y T2.9; AC-L27…L29, L31…L34).
 
 `PATCH /ordenes/{id}/estado`: el administrador con jurisdicción rechaza una orden
 `pendiente` con motivo; el solicitante cancela su orden `pendiente`. Cada transición
 deja la resolución (`resuelto_por_id`, `resuelto_en`) y una fila en
-`ordenes_historial_estado` (D-L10). La cancelación de una `aprobada` por el
-administrador (T2.9) todavía responde 501. Aprobar se prueba en `test_aprobar.py`.
+`ordenes_historial_estado` (D-L10). El administrador cancela una `aprobada` con motivo
+y sin entregas (T2.9). Aprobar se prueba en `test_aprobar.py`.
 """
 
 from datetime import datetime, timedelta
@@ -326,13 +326,74 @@ async def test_el_admin_no_cancela_una_pendiente(client, db, crear_usuario, crea
     await _sin_cambios(db, orden_id, P)
 
 
-# ── Pendiente de T2.9 ────────────────────────────────────────────────
+# ── Cancelación de una orden aprobada por el administrador (T2.9) ────────────
 
 
-async def test_el_admin_cancela_una_aprobada_todavia_responde_501(client, db, crear_usuario):
-    # Se reemplaza en T2.9
-    ana = await crear_usuario(E, USH)
-    orden_id = await _orden_aprobada(db, ana)
+@pytest.mark.parametrize(("rol", "sede_admin"), [(A, USH), (S, None)])
+async def test_el_admin_cancela_una_aprobada_con_motivo_y_libera_la_unidad(
+    client, db, crear_usuario, crear_equipamiento, crear_linea, rol, sede_admin
+):  # AC-L33, RN-L16, PRE-17
+    camara = await crear_equipamiento()
+    unidad = camara.unidades[0]
+    orden = await crear_linea(camara, unidad, EstadoDetalleEnum.RESERVADO, dia=1)
+    admin = await crear_usuario(rol, sede_admin)
+
+    r = await _patch(client, admin, orden.id, {"estado": "cancelada", "motivo": "Se rompió"})
+
+    assert r.status_code == 200, r.json()
+    cuerpo = r.json()
+    assert cuerpo["estado"] == "cancelada"
+    assert [d["estado"] for d in cuerpo["detalles"]] == ["cancelado"]
+    assert cuerpo["motivo_resolucion"] == "Se rompió"
+    assert cuerpo["situacion"] == "finalizada"
+    [fila] = await _historial(db, orden.id)
+    assert (fila.estado_anterior, fila.estado_nuevo) == (
+        EstadoOrdenEnum.APROBADA,
+        EstadoOrdenEnum.CANCELADA,
+    )
+    assert (fila.motivo, fila.actor_id) == ("Se rompió", _id(admin))
+    # La unidad quedó libre: otra reserva en el mismo período ya no choca con el EXCLUDE.
+    otra = await crear_linea(camara, unidad, EstadoDetalleEnum.RESERVADO, dia=1)
+    assert otra.detalles[0].unidad_fisica_id == unidad.id
+
+
+async def test_el_admin_no_cancela_una_aprobada_sin_motivo(
+    client, db, crear_usuario, crear_equipamiento, crear_linea
+):  # AC-L34
+    camara = await crear_equipamiento()
+    orden = await crear_linea(camara, camara.unidades[0], EstadoDetalleEnum.RESERVADO)
     admin = await crear_usuario(A, USH)
-    r = await _patch(client, admin, orden_id, {"estado": "cancelada", "motivo": "Rota"})
-    assert r.status_code == 501
+
+    r = await _patch(client, admin, orden.id, CANCELACION)
+
+    assert r.status_code == 422
+    assert r.json()["code"] == "MOTIVO_REQUERIDO"
+    await _sin_cambios(db, orden.id, EstadoOrdenEnum.APROBADA)
+    assert (await _orden(db, orden.id)).detalles[0].estado is EstadoDetalleEnum.RESERVADO
+
+
+async def test_el_admin_no_cancela_una_orden_con_equipos_entregados(
+    client, db, crear_usuario, crear_equipamiento, crear_linea
+):  # AC-L34, RN-L16: lo entregado se resuelve con la devolución (Fase 3)
+    camara = await crear_equipamiento()
+    orden = await crear_linea(camara, camara.unidades[0], EstadoDetalleEnum.ENTREGADO)
+    admin = await crear_usuario(A, USH)
+
+    r = await _patch(client, admin, orden.id, {"estado": "cancelada", "motivo": "x"})
+
+    assert r.status_code == 409
+    assert r.json()["code"] == "TRANSICION_INVALIDA"
+    await _sin_cambios(db, orden.id, EstadoOrdenEnum.APROBADA)
+
+
+async def test_un_admin_de_otra_sede_no_cancela_una_aprobada(
+    client, db, crear_usuario, crear_equipamiento, crear_linea
+):  # RN-L26
+    camara = await crear_equipamiento()
+    orden = await crear_linea(camara, camara.unidades[0], EstadoDetalleEnum.RESERVADO)
+    admin_rg = await crear_usuario(A, RG)
+
+    r = await _patch(client, admin_rg, orden.id, {"estado": "cancelada", "motivo": "x"})
+
+    assert r.status_code == 404
+    await _sin_cambios(db, orden.id, EstadoOrdenEnum.APROBADA)
