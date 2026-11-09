@@ -20,7 +20,7 @@ from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import permiso_insuficiente, resolver_alcance_sede
+from app.core.deps import SesionActual, permiso_insuficiente, resolver_alcance_sede
 from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum
 from app.core.email import ErrorEnvioCorreo, TipoCorreo, enviar_correo
 from app.core.errors import AppError
@@ -885,6 +885,58 @@ async def confirmar_recuperacion(db: AsyncSession, token: str, password_nueva: s
     await _invalidar_tokens_recuperacion(db, usuario_id)  # RN-48
     _registrar_cambios(db, usuario, {"password": [_OCULTO, _OCULTO]}, actor_id=usuario_id)
     await db.commit()
+
+
+# ── SPEC-03 · Renovación de sesión (D-06 de SPEC-01, Fase B3) ────────────────
+
+
+def _sesion_maxima() -> AppError:
+    return AppError(
+        401,
+        "TOKEN_SESION_MAXIMA",
+        "Pasó el tiempo máximo de la sesión. Iniciá sesión nuevamente.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _emitir_token(usuario: Usuario, *, auth_time: int) -> Sesion:
+    token, expires_in = crear_access_token(
+        usuario_id=usuario.id,
+        rol=usuario.rol,
+        sede=usuario.sede,
+        token_version=usuario.token_version,
+        auth_time=auth_time,
+    )
+    return Sesion(usuario=usuario, access_token=token, expires_in=expires_in)
+
+
+def renovar_sesion(sesion: SesionActual) -> Sesion:
+    """Cambia un access token vigente por otro nuevo (D-13, RN-65…RN-68).
+
+    La sesión ya viene validada contra la base por ``get_sesion_actual`` (estado
+    ``ACTIVO`` y ``token_version``, RN-67). El token nuevo conserva ``auth_time`` y vence
+    a los ``JWT_ACCESS_TOKEN_EXPIRE_MINUTES``; pasadas ``JWT_SESION_MAX_HORAS`` desde
+    ``auth_time`` responde ``401 TOKEN_SESION_MAXIMA`` (RN-66). El token anterior no se
+    revoca: vence solo.
+    """
+    tope = get_settings().jwt_sesion_max_horas * 3600
+    if datetime.now(UTC).timestamp() - sesion.auth_time > tope:
+        raise _sesion_maxima()
+    return _emitir_token(sesion.usuario, auth_time=sesion.auth_time)
+
+
+async def cerrar_sesiones(db: AsyncSession, sesion: SesionActual) -> Sesion:
+    """Cierra todas las sesiones del usuario menos la actual (D-14, RN-69).
+
+    Incrementa ``token_version`` (RN-08: todos los tokens emitidos dejan de valer) y
+    devuelve uno nuevo para la pestaña actual. Conserva ``auth_time``: no es un inicio de
+    sesión nuevo, así que no estira el tope de RN-66.
+    """
+    usuario = await _bloquear(db, sesion.usuario.id)
+    usuario.token_version += 1
+    await db.commit()
+    await db.refresh(usuario)
+    return _emitir_token(usuario, auth_time=sesion.auth_time)
 
 
 # ── API pública para otros módulos (SPEC-03 §4, P3.3) ────────────────────────

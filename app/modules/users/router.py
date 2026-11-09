@@ -7,7 +7,13 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_current_user_permitiendo_cambio, require_roles
+from app.core.deps import (
+    SesionActual,
+    get_current_user_permitiendo_cambio,
+    get_sesion_actual,
+    get_sesion_operativa,
+    require_roles,
+)
 from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum
 from app.core.errors import error_responses
 from app.database import get_db
@@ -122,6 +128,47 @@ async def cambiar_password(
         expires_in=sesion.expires_in,
         usuario=UsuarioPublico.model_validate(sesion.usuario),
     )
+
+
+def _token_response(sesion: service.Sesion) -> TokenResponse:
+    return TokenResponse(
+        access_token=sesion.access_token,
+        expires_in=sesion.expires_in,
+        usuario=UsuarioPublico.model_validate(sesion.usuario),
+    )
+
+
+@auth_router.post(
+    "/renovar",
+    response_model=TokenResponse,
+    summary="Renovar el access token de la sesión actual",
+    responses=error_responses(401),
+)
+async def renovar(sesion: SesionActual = Depends(get_sesion_actual)) -> TokenResponse:
+    """Cambia un token vigente por otro nuevo con el mismo inicio de sesión (D-06 de SPEC-01).
+
+    Disponible aun con cambio obligatorio de contraseña pendiente. Pasadas
+    ``JWT_SESION_MAX_HORAS`` desde el login responde ``401 TOKEN_SESION_MAXIMA`` y hay que
+    volver a iniciar sesión (SPEC-03 RN-65…RN-68).
+    """
+    return _token_response(service.renovar_sesion(sesion))
+
+
+@auth_router.post(
+    "/me/sesiones/cerrar",
+    response_model=TokenResponse,
+    summary="Cerrar todas mis sesiones",
+    responses=error_responses(401, 403),
+)
+async def cerrar_sesiones(
+    sesion: SesionActual = Depends(get_sesion_operativa),
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    """Invalida todos los tokens emitidos y devuelve uno nuevo para esta pestaña (SPEC-03 RN-69).
+
+    Sirve para cerrar una sesión olvidada en una computadora compartida (D-14).
+    """
+    return _token_response(await service.cerrar_sesiones(db, sesion))
 
 
 @auth_router.put(

@@ -12,6 +12,7 @@ La autorización usa SIEMPRE los datos vigentes en base de datos; ``rol`` y
 """
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -28,10 +29,18 @@ bearer_scheme = HTTPBearer(auto_error=False, description="Access token JWT (SPEC
 _WWW_AUTH = {"WWW-Authenticate": "Bearer"}
 
 
-async def _usuario_autenticado(
+@dataclass(frozen=True, slots=True)
+class SesionActual:
+    """Usuario autenticado y el inicio de su sesión (``auth_time``, SPEC-03 §7)."""
+
+    usuario: Usuario
+    auth_time: int
+
+
+async def _sesion_autenticada(
     credentials: HTTPAuthorizationCredentials | None,
     db: AsyncSession,
-) -> Usuario:
+) -> SesionActual:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise AppError(401, "NO_AUTENTICADO", "Se requiere iniciar sesión.", headers=_WWW_AUTH)
 
@@ -47,7 +56,17 @@ async def _usuario_autenticado(
             "La sesión fue cerrada por un cambio en tu cuenta.",
             headers=_WWW_AUTH,
         )
-    return usuario
+    return SesionActual(usuario=usuario, auth_time=payload.auth_time)
+
+
+def _exigir_password_resuelta(usuario: Usuario) -> None:
+    """SPEC-02 RN-33: con el cambio obligatorio pendiente sólo se puede cambiar la contraseña."""
+    if usuario.debe_cambiar_password:
+        raise AppError(
+            403,
+            "CAMBIO_PASSWORD_REQUERIDO",
+            "Tenés que cambiar tu contraseña antes de continuar.",
+        )
 
 
 async def get_current_user_permitiendo_cambio(
@@ -58,7 +77,25 @@ async def get_current_user_permitiendo_cambio(
 
     Sólo para ``GET /auth/me`` y ``POST /auth/me/password`` (SPEC-02 RN-33).
     """
-    return await _usuario_autenticado(credentials, db)
+    return (await _sesion_autenticada(credentials, db)).usuario
+
+
+async def get_sesion_actual(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> SesionActual:
+    """Sesión vigente con su ``auth_time``, aun con cambio obligatorio pendiente.
+
+    Mismas validaciones que ``get_current_user_permitiendo_cambio`` (estado ``ACTIVO`` y
+    ``token_version``). Para ``POST /auth/renovar`` (SPEC-03 §7.2, RN-67).
+    """
+    return await _sesion_autenticada(credentials, db)
+
+
+async def get_sesion_operativa(sesion: SesionActual = Depends(get_sesion_actual)) -> SesionActual:
+    """Como ``get_sesion_actual``, pero exige el cambio de contraseña resuelto (SPEC-02 RN-33)."""
+    _exigir_password_resuelta(sesion.usuario)
+    return sesion
 
 
 async def get_current_user(
@@ -70,13 +107,8 @@ async def get_current_user(
     Bloquea a quien deba cambiar su contraseña (SPEC-02 RN-33): así ningún
     endpoint protegido puede olvidar esa regla.
     """
-    usuario = await _usuario_autenticado(credentials, db)
-    if usuario.debe_cambiar_password:
-        raise AppError(
-            403,
-            "CAMBIO_PASSWORD_REQUERIDO",
-            "Tenés que cambiar tu contraseña antes de continuar.",
-        )
+    usuario = (await _sesion_autenticada(credentials, db)).usuario
+    _exigir_password_resuelta(usuario)
     return usuario
 
 
