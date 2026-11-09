@@ -60,14 +60,26 @@ def verify_dummy(password: str) -> None:
 class TokenPayload:
     sub: int
     tv: int
+    auth_time: int
+    """Inicio de la sesión (epoch en segundos); sin el claim, el ``iat`` (SPEC-03 RN-68)."""
 
 
 def crear_access_token(
-    *, usuario_id: int, rol: RolUsuario, sede: SedeEnum | None, token_version: int
+    *,
+    usuario_id: int,
+    rol: RolUsuario,
+    sede: SedeEnum | None,
+    token_version: int,
+    auth_time: int | None = None,
 ) -> tuple[str, int]:
-    """Emite un access token. Devuelve ``(token, expires_in_segundos)``."""
+    """Emite un access token. Devuelve ``(token, expires_in_segundos)``.
+
+    ``auth_time`` es el inicio de la sesión: el login lo omite (vale el ``iat``) y la
+    renovación lo conserva del token anterior (SPEC-03 RN-65).
+    """
     settings = get_settings()
     ahora = datetime.now(UTC)
+    iat = int(ahora.timestamp())
     expires_in = settings.jwt_access_token_expire_minutes * 60
     claims = {
         "sub": str(usuario_id),
@@ -75,7 +87,8 @@ def crear_access_token(
         "sede": sede.value if sede is not None else None,
         "tv": token_version,
         "iss": JWT_ISSUER,
-        "iat": int(ahora.timestamp()),
+        "iat": iat,
+        "auth_time": auth_time if auth_time is not None else iat,
         "exp": int((ahora + timedelta(seconds=expires_in)).timestamp()),
         "jti": str(uuid.uuid4()),
     }
@@ -103,9 +116,20 @@ def decodificar_token(token: str) -> TokenPayload:
         raise token_invalido() from exc
 
     try:
-        return TokenPayload(sub=int(claims["sub"]), tv=int(claims["tv"]))
+        return TokenPayload(
+            sub=int(claims["sub"]),
+            tv=int(claims["tv"]),
+            auth_time=_entero(claims.get("auth_time", claims["iat"])),  # RN-68
+        )
     except (TypeError, ValueError) as exc:
         raise token_invalido() from exc
+
+
+def _entero(valor: object) -> int:
+    """Un claim numérico entero; ``bool`` y cadenas no valen."""
+    if isinstance(valor, bool) or not isinstance(valor, (int, float)):
+        raise TypeError("claim no numérico")
+    return int(valor)
 
 
 def token_invalido() -> AppError:

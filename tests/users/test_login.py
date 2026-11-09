@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum
+from app.core.settings import get_settings
 from app.modules.users.models import Usuario, UsuarioHistorialEstado
 from tests.conftest import PASSWORD, auth
 
@@ -25,7 +26,8 @@ async def test_login_exitoso_y_me(client, db, crear_usuario):  # AC-15
     r = await _login(client, u.email)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["token_type"] == "bearer" and body["expires_in"] == 3600
+    assert body["token_type"] == "bearer"
+    assert body["expires_in"] == get_settings().jwt_access_token_expire_minutes * 60
     assert body["usuario"]["id"] == u.id and body["usuario"]["rol"] == "ADMIN_LOCAL"
     assert body["usuario"]["sede"] == "Río Grande"
     claims = jwt.decode(body["access_token"], options={"verify_signature": False})
