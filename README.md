@@ -37,6 +37,7 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 | --- | --- | --- | --- |
 | `users` | `/api/v1/auth`, `/api/v1/users` | USR-01, USR-03, USR-04, USR-05, GLO-01 | Implementado |
 | `config` | `/api/v1/config` | GLO-03 | Implementado |
+| `files` | `/api/v1/files` | PRE-05 (aval), USR-03 (foto) | Implementado (SPEC-03 Fase B2) |
 | `inventory` | `/api/v1/inventory` | PRE-01, PRE-02, PRE-12, PRE-14, PRE-19 | Implementado |
 | `spaces` | `/api/v1/spaces` | RES-01…RES-05, GLO-02, GLO-04 | Implementado |
 | `loans` | `/api/v1/loans` | PRE-03…PRE-11, PRE-13, PRE-15…PRE-18, PRE-20 | Sólo contratos: los endpoints exigen sesión y responden `501 NO_IMPLEMENTADO` |
@@ -48,6 +49,8 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 **Seguridad transversal.** Todos los endpoints, salvo registro, login y `/health`, requieren sesión. El solicitante de una reserva es siempre el usuario autenticado; los recursos creados por un administrador local reciben su sede automáticamente; un recurso de otra sede se responde como inexistente (`404`). Las cuentas creadas o restablecidas por un administrador deben cambiar la contraseña antes de operar (`403 CAMBIO_PASSWORD_REQUERIDO`).
 
 **API pública de `users` para otros módulos.** `app.modules.users.service.datos_publicos_por_ids(db, ids)` devuelve `{id: DatosPublicosUsuario(id, nombre, apellido)}` en una sola consulta, para mostrar al solicitante en `spaces` y `loans` sin importar el modelo `Usuario` (SPEC-03 Fase A). No filtra por sede ni por estado: quien la llama sólo pasa ids que ya puede mostrar, y nunca la usa para exponer identidades en la disponibilidad.
+
+**Archivos (SPEC-03 Fase B2).** La foto de perfil y el PDF de aval de los pedidos de alta gama (la resolución del Consejo) se guardan en PostgreSQL: metadatos en `archivos` y bytes en `archivos_contenido`. El tipo se decide por los primeros bytes, no por la extensión; la foto se vuelve a codificar como JPEG de hasta 512 px sin metadatos (se pierde la ubicación del EXIF). La descarga responde `404` a quien no tiene permiso: el propietario, los administradores con jurisdicción y el Superadministrador. API pública para `loans` en `app.modules.files.service`: `vincular_archivo` (en la transacción de la orden, sin `commit`), `abrir_archivo` (sin control de acceso: lo hace quien llama) y `respuesta_descarga` (encabezados de seguridad comunes).
 
 ---
 
@@ -99,6 +102,9 @@ Definidas en `.env` (ver [`.env.example`](.env.example)). **Nunca versionar `.en
 | `CORS_ORIGINS` | No | `http://localhost:8443` | Orígenes permitidos, separados por coma |
 | `TEST_DATABASE_URL` | Sólo tests | — | Base dedicada; su nombre debe contener `test` |
 | `BOOTSTRAP_SUPERADMIN_PASSWORD` | No | — | Contraseña para el CLI sin prompt interactivo |
+| `ARCHIVO_FOTO_MAX_MB` · `ARCHIVO_PDF_MAX_MB` | No | `2` · `10` | Tamaño máximo de la foto de perfil y del PDF de aval |
+| `ARCHIVO_HUERFANO_HORAS` | No | `24` | Antigüedad desde la que `limpiar-huerfanos` borra los archivos sin vincular |
+| `ARCHIVO_MAX_PENDIENTES` | No | `5` | Archivos sin vincular por usuario (el siguiente responde `409`) |
 
 Fechas y horas de reservas se interpretan en la zona del laboratorio, `America/Argentina/Ushuaia` (dependencia `tzdata`).
 
@@ -140,11 +146,15 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | | `POST /api/v1/auth/login` | Inicio de sesión (JWT) |
 | | `GET /api/v1/auth/me` · `PATCH /api/v1/auth/me` | Perfil propio; editar teléfono y email |
 | | `POST /api/v1/auth/me/password` | Cambiar la contraseña (emite un token nuevo) |
+| | `PUT /api/v1/auth/me/foto` · `DELETE /api/v1/auth/me/foto` | Subir, reemplazar o quitar la foto de perfil (multipart, campo `archivo`; JPEG, PNG o WebP) |
 | Usuarios | `GET /api/v1/users` | Directorio con filtros y aislamiento de sede |
 | | `GET /api/v1/users/{id}` | Detalle administrativo |
 | | `POST /api/v1/users` | Alta directa (Superadministrador) |
 | | `PATCH /api/v1/users/{id}` | Editar datos, rol, sede o restablecer la contraseña |
 | | `PATCH /api/v1/users/{id}/estado` | Aprobar, rechazar, suspender, dar de baja, reactivar |
+| | `DELETE /api/v1/users/{id}/foto` | Quitar la foto de una cuenta (el `ADMIN_LOCAL`, sólo de estudiantes y docentes de su sede) |
+| Archivos | `POST /api/v1/files/archivos` | Subir el PDF de aval (estudiantes y docentes; multipart: `archivo` y `proposito=AVAL_PRESTAMO`). Queda sin vincular hasta que `loans` lo asocia a la orden |
+| | `GET /api/v1/files/archivos/{id}/contenido` | Descargar un archivo; `404` si no corresponde verlo |
 | Configuración | `GET /api/v1/config/parametros[/{clave}]` | Parámetros operativos |
 | | `PUT /api/v1/config/parametros/{clave}` | Modificar (Superadministrador, con control de versión) |
 | | `GET /api/v1/config/parametros/{clave}/historial` | Historial de cambios |
@@ -193,6 +203,7 @@ alembic current               # revisión actual
 
 - Archivos en `alembic/versions/` con el formato `000N_<descripcion>.py`, escritos a mano y **siempre reversibles** (`upgrade` + `downgrade`).
 - Cada módulo nuevo registra sus modelos en `alembic/env.py`.
+- **Mantenimiento de archivos:** `python -m app.modules.files.cli limpiar-huerfanos [--horas N]` borra los archivos sin vincular más viejos que `ARCHIVO_HUERFANO_HORAS`. Es idempotente; conviene programarlo una vez por día en el despliegue.
 - Requiere la extensión `btree_gist` (la crea la migración `0001`; el usuario necesita permiso para crear extensiones o un administrador debe crearla antes).
 
 ---

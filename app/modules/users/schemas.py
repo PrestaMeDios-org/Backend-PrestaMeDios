@@ -7,6 +7,7 @@
 
 from datetime import UTC, datetime
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import (
     AwareDatetime,
@@ -111,6 +112,11 @@ class UsuarioResumen(BaseModel):
     sede: SedeEnum | None = Field(..., examples=["Ushuaia"])
     estado: EstadoCuenta = Field(..., examples=["PENDIENTE_APROBACION"])
     created_at: datetime = Field(..., examples=["2026-10-07T13:45:00Z"])
+    foto_id: UUID | None = Field(
+        default=None,
+        examples=["3f2b8c1e-5d4a-4b6f-9a1e-2c7d8e9f0a1b"],
+        description="Foto de perfil vigente; se descarga por `/api/v1/files` (USR-03).",
+    )
 
 
 class UsuarioPublico(UsuarioResumen):

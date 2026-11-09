@@ -4,13 +4,14 @@
 - ``users_router`` → montado en ``/api/v1/users`` (USR-04, USR-05, GLO-01).
 """
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user_permitiendo_cambio, require_roles
 from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum
 from app.core.errors import error_responses
 from app.database import get_db
+from app.modules.files.router import content_length
 from app.modules.users import service
 from app.modules.users.models import Usuario
 from app.modules.users.schemas import (
@@ -119,6 +120,39 @@ async def cambiar_password(
     )
 
 
+@auth_router.put(
+    "/me/foto",
+    response_model=UsuarioPublico,
+    summary="Subir o reemplazar mi foto de perfil",
+    responses=error_responses(401, 403, 422),
+)
+async def subir_foto(
+    archivo: UploadFile = File(..., description="JPEG, PNG o WebP de hasta 2 MB."),
+    largo: int | None = Depends(content_length),
+    usuario: Usuario = Depends(_sesion_activa),
+    db: AsyncSession = Depends(get_db),
+) -> Usuario:
+    """Se guarda como JPEG de hasta 512 px sin metadatos y reemplaza a la anterior (USR-03).
+
+    El tipo se decide por los bytes (RN-55); la foto anterior se borra (RN-59).
+    """
+    return await service.reemplazar_foto(db, usuario, archivo, content_length=largo)
+
+
+@auth_router.delete(
+    "/me/foto",
+    response_model=UsuarioPublico,
+    summary="Quitar mi foto de perfil",
+    responses=error_responses(401, 403),
+)
+async def quitar_foto(
+    usuario: Usuario = Depends(_sesion_activa),
+    db: AsyncSession = Depends(get_db),
+) -> Usuario:
+    """Deja ``foto_id = null`` y borra el archivo (USR-03, RN-59)."""
+    return await service.quitar_foto(db, usuario)
+
+
 # ── /users ───────────────────────────────────────────────────────────────────
 
 
@@ -224,3 +258,18 @@ async def editar_usuario(
 ) -> Usuario:
     """Edición administrativa con jurisdicción por sede y auditoría (USR-04, SPEC-02 UC-12)."""
     return await service.editar_por_admin(db, actor, usuario_id, payload)
+
+
+@users_router.delete(
+    "/{usuario_id}/foto",
+    response_model=UsuarioDetalle,
+    summary="Quitar la foto de perfil de una cuenta",
+    responses=error_responses(401, 403, 404),
+)
+async def quitar_foto_de_usuario(
+    usuario_id: int,
+    actor: Usuario = Depends(_solo_admins),
+    db: AsyncSession = Depends(get_db),
+) -> Usuario:
+    """Con jurisdicción por sede; el ``ADMIN_LOCAL`` sólo sobre estudiantes y docentes (RN-64)."""
+    return await service.quitar_foto_por_admin(db, actor, usuario_id)

@@ -38,6 +38,14 @@ class Settings(BaseSettings):
         default=60, ge=1, le=1440, alias="JWT_ACCESS_TOKEN_EXPIRE_MINUTES"
     )
 
+    # Archivos (SPEC-03 §6.2, RN-56, RN-58, RN-63).
+    archivo_foto_max_mb: int = Field(default=2, ge=1, le=20, alias="ARCHIVO_FOTO_MAX_MB")
+    archivo_pdf_max_mb: int = Field(default=10, ge=1, le=50, alias="ARCHIVO_PDF_MAX_MB")
+    archivo_huerfano_horas: int = Field(
+        default=24, ge=1, le=24 * 30, alias="ARCHIVO_HUERFANO_HORAS"
+    )
+    archivo_max_pendientes: int = Field(default=5, ge=1, le=50, alias="ARCHIVO_MAX_PENDIENTES")
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.errors import AppError, app_error_handler
 from app.core.settings import get_settings
 from app.modules.config.router import router as config_router
+from app.modules.files.router import router as files_router
 from app.modules.inventory.router import router as inventory_router
 from app.modules.loans.router import router as loans_router
 from app.modules.notifications.router import router as notifications_router
@@ -55,6 +56,12 @@ app.include_router(
     config_router,
     prefix="/api/v1/config",
     tags=["Configuración Global"],
+)
+
+app.include_router(
+    files_router,
+    prefix="/api/v1/files",
+    tags=["Archivos"],
 )
 
 app.include_router(
