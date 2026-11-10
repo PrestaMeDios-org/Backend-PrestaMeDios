@@ -35,9 +35,11 @@ class Settings(BaseSettings):
     )
     cors_origins: str = Field(default="http://localhost:8443", alias="CORS_ORIGINS")
     jwt_secret_key: str = Field(..., min_length=32, alias="JWT_SECRET_KEY")
+    # Renovación deslizante con tope absoluto (SPEC-03 §7, RN-65, RN-66, D-13).
     jwt_access_token_expire_minutes: int = Field(
-        default=60, ge=1, le=1440, alias="JWT_ACCESS_TOKEN_EXPIRE_MINUTES"
+        default=30, ge=1, le=1440, alias="JWT_ACCESS_TOKEN_EXPIRE_MINUTES"
     )
+    jwt_sesion_max_horas: int = Field(default=8, ge=1, le=72, alias="JWT_SESION_MAX_HORAS")
 
     # Archivos (SPEC-03 §6.2, RN-56, RN-58, RN-63).
     archivo_foto_max_mb: int = Field(default=2, ge=1, le=20, alias="ARCHIVO_FOTO_MAX_MB")

@@ -151,7 +151,7 @@ class TokenResponse(BaseModel):
 
     access_token: str = Field(..., examples=["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."])
     token_type: Literal["bearer"] = "bearer"
-    expires_in: int = Field(..., examples=[3600])
+    expires_in: int = Field(..., examples=[1800])
     usuario: UsuarioPublico
 
 
