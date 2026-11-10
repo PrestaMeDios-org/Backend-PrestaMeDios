@@ -1,0 +1,6 @@
+$titulo
+$mensaje
+
+Podés ver el detalle en PrestaMeDios: $enlace_app
+
+Este es un aviso automático de PrestaMeDios; no respondas a este correo.

@@ -35,7 +35,7 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 
 | Módulo | Prefijo | Requisitos | Estado |
 | --- | --- | --- | --- |
-| `users` | `/api/v1/auth`, `/api/v1/users` | USR-01, USR-03, USR-04, USR-05, GLO-01 | Implementado |
+| `users` | `/api/v1/auth`, `/api/v1/users` | USR-01, USR-02, USR-03, USR-04, USR-05, GLO-01 | Implementado |
 | `config` | `/api/v1/config` | GLO-03 | Implementado |
 | `files` | `/api/v1/files` | PRE-05 (aval), USR-03 (foto) | Implementado (SPEC-03 Fase B2) |
 | `inventory` | `/api/v1/inventory` | PRE-01, PRE-02, PRE-12, PRE-14, PRE-19 | Implementado |
@@ -46,7 +46,7 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 
 **Roles:** `SUPERADMIN` (ambas sedes) · `ADMIN_LOCAL` (una sede) · `DOCENTE` · `ESTUDIANTE`. Los usuarios sólo operan sobre los recursos de su sede, excepto el Superadministrador.
 
-**Seguridad transversal.** Todos los endpoints, salvo registro, login y `/health`, requieren sesión. El solicitante de una reserva es siempre el usuario autenticado; los recursos creados por un administrador local reciben su sede automáticamente; un recurso de otra sede se responde como inexistente (`404`). Las cuentas creadas o restablecidas por un administrador deben cambiar la contraseña antes de operar (`403 CAMBIO_PASSWORD_REQUERIDO`).
+**Seguridad transversal.** Todos los endpoints, salvo registro, login, recuperación de contraseña y `/health`, requieren sesión. El solicitante de una reserva es siempre el usuario autenticado; los recursos creados por un administrador local reciben su sede automáticamente; un recurso de otra sede se responde como inexistente (`404`). Las cuentas creadas o restablecidas por un administrador deben cambiar la contraseña antes de operar (`403 CAMBIO_PASSWORD_REQUERIDO`).
 
 **API pública de `users` para otros módulos.** `app.modules.users.service.datos_publicos_por_ids(db, ids)` devuelve `{id: DatosPublicosUsuario(id, nombre, apellido)}` en una sola consulta, para mostrar al solicitante en `spaces` y `loans` sin importar el modelo `Usuario` (SPEC-03 Fase A). No filtra por sede ni por estado: quien la llama sólo pasa ids que ya puede mostrar, y nunca la usa para exponer identidades en la disponibilidad.
 
@@ -105,6 +105,14 @@ Definidas en `.env` (ver [`.env.example`](.env.example)). **Nunca versionar `.en
 | `ARCHIVO_FOTO_MAX_MB` · `ARCHIVO_PDF_MAX_MB` | No | `2` · `10` | Tamaño máximo de la foto de perfil y del PDF de aval |
 | `ARCHIVO_HUERFANO_HORAS` | No | `24` | Antigüedad desde la que `limpiar-huerfanos` borra los archivos sin vincular |
 | `ARCHIVO_MAX_PENDIENTES` | No | `5` | Archivos sin vincular por usuario (el siguiente responde `409`) |
+| `EMAIL_BACKEND` | No | `smtp` | `smtp` o `memoria` (los tests usan siempre `memoria`) |
+| `SMTP_HOST` · `SMTP_PORT` | No | `localhost` · `1025` | Servidor de correo (Mailpit en desarrollo) |
+| `SMTP_USER` · `SMTP_PASSWORD` | No | — | Credenciales SMTP (sólo en `.env`) |
+| `SMTP_TLS` | No | `starttls` | `starttls`, `ssl` o `ninguno` (Mailpit: `ninguno`) |
+| `EMAIL_FROM` | No | `PrestaMeDios <no-responder@localhost>` | Remitente |
+| `FRONTEND_URL` | No | `http://localhost:8443` | Base de los enlaces de los correos |
+| `RECUPERACION_VIGENCIA_MINUTOS` | No | `30` | Vida del enlace de recuperación de contraseña |
+| `RECUPERACION_MAX_POR_EMAIL_HORA` · `RECUPERACION_MAX_POR_IP_HORA` | No | `3` · `20` | Pedidos de recuperación por hora (el siguiente responde `429`) |
 
 Fechas y horas de reservas se interpretan en la zona del laboratorio, `America/Argentina/Ushuaia` (dependencia `tzdata`).
 
@@ -132,6 +140,16 @@ curl localhost:8000/api/v1/auth/me -H "Authorization: Bearer <access_token>"
 
 En Swagger (`/docs`) usar el botón **Authorize** y pegar el `access_token`.
 
+**Recuperar la contraseña (USR-02).** `POST /api/v1/auth/recuperacion` con `{"email"}` responde siempre el mismo `202`, exista o no la cuenta, y sólo manda el correo a cuentas activas. El enlace es `{FRONTEND_URL}/#/restablecer?token=…` (el token va en el fragmento, que el navegador no manda al servidor) y vence a los `RECUPERACION_VIGENCIA_MINUTOS`. El frontend manda el token y la contraseña nueva a `POST /api/v1/auth/recuperacion/confirmar`; eso cierra todas las sesiones y no inicia una nueva.
+
+**Correo en desarrollo (Mailpit).** Mailpit recibe los correos sin mandarlos a nadie:
+
+```bash
+docker run -d --name mailpit -p 1025:1025 -p 8025:8025 axllent/mailpit
+```
+
+Con `SMTP_HOST=localhost`, `SMTP_PORT=1025` y `SMTP_TLS=ninguno` en el `.env`, los correos se ven en http://localhost:8025. Otros módulos mandan correos con `app.core.email.enviar_correo(TipoCorreo.<TIPO>, destinatario, contexto)`; cada tipo tiene su plantilla en `app/core/plantillas_correo/` (`notifications` usa `TipoCorreo.NOTIFICACION` con `titulo` y `mensaje`).
+
 **Errores.** Los errores de negocio responden `{"detail": "<mensaje>", "code": "<CODIGO>"}` (p. ej. `CUENTA_PENDIENTE_APROBACION`, `SEDE_FUERA_DE_ALCANCE`, `TOKEN_REVOCADO`); los de validación usan el formato estándar de FastAPI (`422`).
 
 ---
@@ -146,6 +164,7 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | | `POST /api/v1/auth/login` | Inicio de sesión (JWT) |
 | | `GET /api/v1/auth/me` · `PATCH /api/v1/auth/me` | Perfil propio; editar teléfono y email |
 | | `POST /api/v1/auth/me/password` | Cambiar la contraseña (emite un token nuevo) |
+| | `POST /api/v1/auth/recuperacion` · `POST /api/v1/auth/recuperacion/confirmar` | Pedir el enlace para restablecer la contraseña y confirmarlo (públicos) |
 | | `PUT /api/v1/auth/me/foto` · `DELETE /api/v1/auth/me/foto` | Subir, reemplazar o quitar la foto de perfil (multipart, campo `archivo`; JPEG, PNG o WebP) |
 | Usuarios | `GET /api/v1/users` | Directorio con filtros y aislamiento de sede |
 | | `GET /api/v1/users/{id}` | Detalle administrativo |
