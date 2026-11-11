@@ -284,12 +284,21 @@ class TestTransiciones:
         r = await _estado(client, otro, res.id_reserva, nuevo_estado="Cancelada")
         assert r.status_code == 404 and r.json()["code"] == "RESERVA_NO_ENCONTRADA"
 
-    async def test_dueno_no_cancela_pasada(self, client, crear_usuario, crear_espacio, crear_reserva):  # EC-27
+    async def test_dueno_no_cancela_pendiente_pasada(self, client, crear_usuario, crear_espacio, crear_reserva):
+        est = await crear_usuario(R.ESTUDIANTE, USH)
+        esp = await crear_espacio(USH)
+        res = await crear_reserva(est, esp, fecha=dia(-1), estado="Pendiente")
+        r = await _estado(client, est, res.id_reserva, nuevo_estado="Cancelada")
+        assert r.status_code == 409 and r.json()["code"] == "TRANSICION_INVALIDA"
+
+    async def test_dueno_cancela_aprobada_aunque_inicio_haya_pasado(
+        self, client, crear_usuario, crear_espacio, crear_reserva
+    ):
         est = await crear_usuario(R.ESTUDIANTE, USH)
         esp = await crear_espacio(USH)
         res = await crear_reserva(est, esp, fecha=dia(-1), estado="Aprobada")
         r = await _estado(client, est, res.id_reserva, nuevo_estado="Cancelada")
-        assert r.status_code == 409 and r.json()["code"] == "TRANSICION_INVALIDA"
+        assert r.status_code == 200 and r.json()["estado_reserva"] == "Cancelada"
 
     async def test_admin_de_otra_sede(self, client, crear_usuario, crear_espacio, crear_reserva):
         admin_rg = await crear_usuario(R.ADMIN_LOCAL, RG)

@@ -347,7 +347,9 @@ async def cambiar_estado_reserva(
             inicio = datetime.combine(
                 reserva.fecha_reserva, reserva.hora_inicio, tzinfo=ZONA_HORARIA_LAB
             )
-            if actual not in CANCELABLES_POR_DUENO or inicio <= ahora_lab():  # EC-27
+            if actual not in CANCELABLES_POR_DUENO or (
+                actual == ER.PENDIENTE and inicio <= ahora_lab()
+            ):  # EC-27: una aprobada sigue cancelable hasta pasar a En_Uso
                 raise _transicion_invalida(actual, nuevo)
 
         if nuevo in (ER.APROBADA, ER.EN_USO):
