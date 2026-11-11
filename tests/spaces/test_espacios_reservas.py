@@ -1,4 +1,8 @@
-"""SPEC-02 §3 · Integración de seguridad en `spaces` — AC-31…AC-38, EC-23…EC-28."""
+"""SPEC-02 §3 · Integración de seguridad en `spaces` — AC-31…AC-38, EC-23…EC-28.
+
+SPEC-08 v1.1.0: solicitante sólo para administradores (AC-S14, EC-S09, EC-S10), bloqueo
+general (AC-S15, EC-S13) y reversión lógica de bloqueos (AC-S16, EC-S11, EC-S12).
+"""
 
 import asyncio
 from datetime import datetime, time, timedelta
@@ -44,6 +48,8 @@ async def _estado(client, actor, reserva_id, **payload):
     [
         ("get", "/espacios"), ("post", "/espacios"), ("get", "/reservas"), ("post", "/reservas"),
         ("patch", "/reservas/1/estado"), ("get", "/bloqueos"), ("post", "/bloqueos"),
+        ("post", "/bloqueos/general"),
+        ("patch", "/bloqueos/1/estado"),
         ("get", "/disponibilidad?fecha=2026-10-12"),
     ],
 )
@@ -202,7 +208,7 @@ class TestValidacionesDeCreacion:  # AC-35
 
 
 async def test_privacidad_de_reservas(client, crear_usuario, crear_espacio, crear_reserva):
-    est = await crear_usuario(R.ESTUDIANTE, USH)
+    est = await crear_usuario(R.ESTUDIANTE, USH, nombre="Ana", apellido="Pérez")
     otro = await crear_usuario(R.ESTUDIANTE, USH)
     esp_ush = await crear_espacio(USH)
     esp_rg = await crear_espacio(RG, "Isla RG")
@@ -228,6 +234,9 @@ async def test_privacidad_de_reservas(client, crear_usuario, crear_espacio, crea
     admin = await crear_usuario(R.ADMIN_LOCAL, USH)
     r = await client.get(f"{B}/reservas", headers=auth(admin))
     assert len(r.json()) == 2 and all(x["id_espacio"] == esp_ush.id_espacio for x in r.json())
+    solicitud = next(x for x in r.json() if x["id_usuario"] == est.id)  # AC-S14
+    assert solicitud["solicitante_nombre"] == "Ana"
+    assert solicitud["solicitante_apellido"] == "Pérez"
     r = await client.get(f"{B}/reservas", params={"id_usuario": otro.id}, headers=auth(admin))
     assert len(r.json()) == 1
 
@@ -281,12 +290,21 @@ class TestTransiciones:
         r = await _estado(client, otro, res.id_reserva, nuevo_estado="Cancelada")
         assert r.status_code == 404 and r.json()["code"] == "RESERVA_NO_ENCONTRADA"
 
-    async def test_dueno_no_cancela_pasada(self, client, crear_usuario, crear_espacio, crear_reserva):  # EC-27
+    async def test_dueno_no_cancela_pasada(self, client, crear_usuario, crear_espacio, crear_reserva):
         est = await crear_usuario(R.ESTUDIANTE, USH)
         esp = await crear_espacio(USH)
         res = await crear_reserva(est, esp, fecha=dia(-1), estado="Aprobada")
         r = await _estado(client, est, res.id_reserva, nuevo_estado="Cancelada")
         assert r.status_code == 409 and r.json()["code"] == "TRANSICION_INVALIDA"
+
+    async def test_dueno_cancela_aprobada_futura(
+        self, client, crear_usuario, crear_espacio, crear_reserva
+    ):
+        est = await crear_usuario(R.ESTUDIANTE, USH)
+        esp = await crear_espacio(USH)
+        res = await crear_reserva(est, esp, fecha=dia(1), estado="Aprobada")
+        r = await _estado(client, est, res.id_reserva, nuevo_estado="Cancelada")
+        assert r.status_code == 200 and r.json()["estado_reserva"] == "Cancelada"
 
     async def test_admin_de_otra_sede(self, client, crear_usuario, crear_espacio, crear_reserva):
         admin_rg = await crear_usuario(R.ADMIN_LOCAL, RG)
@@ -398,6 +416,249 @@ class TestBloqueos:
         assert (await client.get(f"{B}/bloqueos", headers=auth(admin_ush))).json() == []
         assert len((await client.get(f"{B}/bloqueos", headers=auth(admin_rg))).json()) == 1
 
+
+    async def _revertir(self, client, actor, id_bloqueo):
+        return await client.patch(
+            f"{B}/bloqueos/{id_bloqueo}/estado", json={"nuevo_estado": "Revertido"}, headers=auth(actor)
+        )
+
+    async def test_reversion_logica_y_alcance(self, client, crear_usuario, crear_espacio):  # AC-S16
+        admin_ush = await crear_usuario(R.ADMIN_LOCAL, USH)
+        admin_rg = await crear_usuario(R.ADMIN_LOCAL, RG)
+        esp_rg = await crear_espacio(RG)
+        creado = await client.post(f"{B}/bloqueos", json=self._bloqueo(esp_rg), headers=auth(admin_rg))
+        assert creado.json()["estado"] == "Activo" and creado.json()["id_grupo"] is None
+        id_bloqueo = creado.json()["id_bloqueo"]
+
+        docente = await crear_usuario(R.DOCENTE, RG)
+        r = await self._revertir(client, docente, id_bloqueo)
+        assert r.status_code == 403 and r.json()["code"] == "PERMISO_INSUFICIENTE"
+        r = await self._revertir(client, admin_ush, id_bloqueo)
+        assert r.status_code == 404 and r.json()["code"] == "BLOQUEO_NO_ENCONTRADO"
+        r = await client.patch(
+            f"{B}/bloqueos/{id_bloqueo}/estado", json={"nuevo_estado": "Activo"}, headers=auth(admin_rg)
+        )
+        assert r.status_code == 422
+
+        r = await self._revertir(client, admin_rg, id_bloqueo)
+        assert r.status_code == 200
+        assert r.json()["estado"] == "Revertido" and r.json()["revertido_por"] == admin_rg.id
+        assert r.json()["revertido_en"] is not None
+
+        # No se borra: sigue en el listado, revertido (P7.3, D-S01).
+        listado = (await client.get(f"{B}/bloqueos", headers=auth(admin_rg))).json()
+        assert [(b["id_bloqueo"], b["estado"]) for b in listado] == [(id_bloqueo, "Revertido")]
+
+        r = await self._revertir(client, admin_rg, id_bloqueo)
+        assert r.status_code == 409 and r.json()["code"] == "TRANSICION_INVALIDA"
+        r = await self._revertir(client, admin_rg, 999_999)
+        assert r.status_code == 404 and r.json()["code"] == "BLOQUEO_NO_ENCONTRADO"
+
+    async def test_bloqueo_revertido_libera_la_franja(
+        self, client, crear_usuario, crear_espacio
+    ):  # AC-S08, RN-S14
+        admin = await crear_usuario(R.ADMIN_LOCAL, USH)
+        est = await crear_usuario(R.ESTUDIANTE, USH)
+        esp = await crear_espacio(USH)
+        creado = await client.post(f"{B}/bloqueos", json=self._bloqueo(esp), headers=auth(admin))
+        r = await _reservar(client, est, esp)
+        assert r.status_code == 409 and r.json()["code"] == "ESPACIO_BLOQUEADO"
+
+        await self._revertir(client, admin, creado.json()["id_bloqueo"])
+
+        disp = await client.get(f"{B}/disponibilidad", params={"fecha": str(dia(3))}, headers=auth(est))
+        assert disp.json()["bloqueos"] == []
+        assert (await _reservar(client, est, esp)).status_code == 201
+
+    async def test_superadmin_revierte_un_bloqueo_individual(
+        self, client, crear_usuario, crear_espacio
+    ):  # D-S02
+        admin = await crear_usuario(R.ADMIN_LOCAL, RG)
+        sa = await crear_usuario(R.SUPERADMIN)
+        esp = await crear_espacio(RG)
+        creado = await client.post(f"{B}/bloqueos", json=self._bloqueo(esp), headers=auth(admin))
+        r = await self._revertir(client, sa, creado.json()["id_bloqueo"])
+        assert r.status_code == 200 and isinstance(r.json(), dict)
+        assert r.json()["revertido_por"] == sa.id
+
+    async def test_bloqueo_general_solo_superadmin_y_en_ambas_sedes(
+        self, client, crear_usuario, crear_espacio
+    ):
+        superadmin = await crear_usuario(R.SUPERADMIN)
+        admin_local = await crear_usuario(R.ADMIN_LOCAL, USH)
+        espacios = [await crear_espacio(USH), await crear_espacio(RG)]
+        espacios.append(await crear_espacio(RG))
+        payload = {
+            "fecha_inicio": str(dia(3)),
+            "fecha_fin": str(dia(3)),
+            "motivo": "Cierre institucional",
+        }
+
+        denegado = await client.post(
+            f"{B}/bloqueos/general", json=payload, headers=auth(admin_local)
+        )
+        assert denegado.status_code == 403
+
+        creado = await client.post(
+            f"{B}/bloqueos/general", json=payload, headers=auth(superadmin)
+        )
+        assert creado.status_code == 201  # AC-S15
+        assert {b["id_espacio"] for b in creado.json()} == {
+            espacio.id_espacio for espacio in espacios
+        }
+        grupos = {b["id_grupo"] for b in creado.json()}
+        assert len(grupos) == 1 and None not in grupos  # D-S03
+
+    async def test_bloqueo_general_es_atomico_si_hay_reserva_activa(
+        self, client, crear_usuario, crear_espacio, crear_reserva
+    ):
+        superadmin = await crear_usuario(R.SUPERADMIN)
+        estudiante = await crear_usuario(R.ESTUDIANTE, USH)
+        espacio_ush = await crear_espacio(USH)
+        await crear_espacio(RG)
+        await crear_reserva(estudiante, espacio_ush, fecha=dia(3), estado="Aprobada")
+        payload = {
+            "fecha_inicio": str(dia(3)),
+            "fecha_fin": str(dia(3)),
+            "motivo": "Cierre institucional",
+        }
+
+        respuesta = await client.post(
+            f"{B}/bloqueos/general", json=payload, headers=auth(superadmin)
+        )
+        assert respuesta.status_code == 409  # EC-S13
+        assert respuesta.json()["code"] == "BLOQUEO_CON_RESERVAS"
+        bloqueos = await client.get(f"{B}/bloqueos", headers=auth(superadmin))
+        assert bloqueos.json() == []
+
+    async def test_bloqueo_general_sin_espacios(self, client, crear_usuario):  # AC-S15
+        superadmin = await crear_usuario(R.SUPERADMIN)
+        payload = {"fecha_inicio": str(dia(3)), "fecha_fin": str(dia(3)), "motivo": "Cierre"}
+        r = await client.post(f"{B}/bloqueos/general", json=payload, headers=auth(superadmin))
+        assert r.status_code == 404 and r.json()["code"] == "ESPACIOS_NO_ENCONTRADOS"
+
+    async def _general(self, client, superadmin, motivo="Cierre institucional"):
+        payload = {"fecha_inicio": str(dia(3)), "fecha_fin": str(dia(3)), "motivo": motivo}
+        r = await client.post(f"{B}/bloqueos/general", json=payload, headers=auth(superadmin))
+        assert r.status_code == 201
+        return r.json()
+
+    async def test_admin_local_no_revierte_bloqueo_general(
+        self, client, crear_usuario, crear_espacio
+    ):  # EC-S11
+        superadmin = await crear_usuario(R.SUPERADMIN)
+        admin_ush = await crear_usuario(R.ADMIN_LOCAL, USH)
+        esp_ush = await crear_espacio(USH)
+        await crear_espacio(RG)
+        filas = await self._general(client, superadmin)
+        propia = next(f for f in filas if f["id_espacio"] == esp_ush.id_espacio)
+
+        r = await self._revertir(client, admin_ush, propia["id_bloqueo"])
+        assert r.status_code == 403 and r.json()["code"] == "PERMISO_INSUFICIENTE"
+        listado = (await client.get(f"{B}/bloqueos", headers=auth(superadmin))).json()
+        assert {b["estado"] for b in listado} == {"Activo"}
+
+    async def test_revertir_bloqueo_general_revierte_grupo_completo(
+        self, client, crear_usuario, crear_espacio
+    ):  # EC-S12, RN-S16
+        superadmin = await crear_usuario(R.SUPERADMIN)
+        await crear_espacio(USH)
+        await crear_espacio(RG)
+        grupo_a = await self._general(client, superadmin, "Paro")
+        grupo_b = await self._general(client, superadmin, "Feriado")
+
+        r = await self._revertir(client, superadmin, grupo_a[-1]["id_bloqueo"])
+        assert r.status_code == 200
+        assert sorted(b["id_bloqueo"] for b in r.json()) == sorted(b["id_bloqueo"] for b in grupo_a)
+        assert {b["estado"] for b in r.json()} == {"Revertido"}
+
+        listado = (await client.get(f"{B}/bloqueos", headers=auth(superadmin))).json()
+        estados = {b["id_bloqueo"]: b["estado"] for b in listado}
+        assert {estados[b["id_bloqueo"]] for b in grupo_a} == {"Revertido"}
+        assert {estados[b["id_bloqueo"]] for b in grupo_b} == {"Activo"}
+
+        r = await self._revertir(client, superadmin, grupo_a[0]["id_bloqueo"])
+        assert r.status_code == 409 and r.json()["code"] == "TRANSICION_INVALIDA"
+
+    async def test_reversiones_simultaneas_del_mismo_grupo(
+        self, client, crear_usuario, crear_espacio
+    ):  # RN-S16: una gana, la otra recibe 409
+        superadmin = await crear_usuario(R.SUPERADMIN)
+        await crear_espacio(USH)
+        await crear_espacio(RG)
+        filas = await self._general(client, superadmin)
+        respuestas = await asyncio.gather(
+            self._revertir(client, superadmin, filas[0]["id_bloqueo"]),
+            self._revertir(client, superadmin, filas[1]["id_bloqueo"]),
+        )
+        assert sorted(r.status_code for r in respuestas) == [200, 409]
+
+
+# ── SPEC-08 K1: solicitante sólo para administradores (AC-S14, EC-S09, EC-S10) ──
+
+
+async def test_solicitante_ausente_en_post_y_respuesta_del_dueno(
+    client, crear_usuario, crear_espacio
+):  # AC-S14, EC-S09
+    est = await crear_usuario(R.ESTUDIANTE, USH)
+    esp = await crear_espacio(USH)
+    creada = await _reservar(client, est, esp)
+    assert creada.status_code == 201
+    assert not {"solicitante_nombre", "solicitante_apellido"} & creada.json().keys()
+
+    listado = (await client.get(f"{B}/reservas", headers=auth(est))).json()
+    assert listado and not {"solicitante_nombre", "solicitante_apellido"} & listado[0].keys()
+    assert "motivo" in listado[0]  # sólo se omiten las claves del solicitante
+
+    r = await _estado(client, est, creada.json()["id_reserva"], nuevo_estado="Cancelada")
+    assert r.status_code == 200
+    assert not {"solicitante_nombre", "solicitante_apellido"} & r.json().keys()
+
+
+async def test_solicitante_solo_admin_con_jurisdiccion_en_reservas(
+    client, crear_usuario, crear_espacio, crear_reserva
+):  # AC-S14, EC-S09
+    est = await crear_usuario(R.ESTUDIANTE, USH, nombre="Ana", apellido="Pérez")
+    esp = await crear_espacio(USH)
+    res = await crear_reserva(est, esp)
+    admin_ush = await crear_usuario(R.ADMIN_LOCAL, USH)
+    admin_rg = await crear_usuario(R.ADMIN_LOCAL, RG)
+
+    r = await _estado(client, admin_ush, res.id_reserva, nuevo_estado="Aprobada")
+    assert r.status_code == 200
+    assert (r.json()["solicitante_nombre"], r.json()["solicitante_apellido"]) == ("Ana", "Pérez")
+    assert "dni" not in r.json() and "email" not in r.json()
+
+    assert (await client.get(f"{B}/reservas", headers=auth(admin_rg))).json() == []
+    r = await _estado(client, admin_rg, res.id_reserva, nuevo_estado="En_Uso")
+    assert r.status_code == 404
+
+    disp = await client.get(f"{B}/disponibilidad", params={"fecha": str(dia(3))}, headers=auth(admin_ush))
+    assert "solicitante" not in disp.text and "Pérez" not in disp.text
+
+
+async def test_datos_publicos_por_ids_se_consultan_en_lote(
+    client, crear_usuario, crear_espacio, crear_reserva, monkeypatch
+):  # EC-S10
+    from app.modules.spaces import service
+
+    llamadas = []
+    original = service.datos_publicos_por_ids
+
+    async def contar(db, ids):
+        llamadas.append(set(ids))
+        return await original(db, ids)
+
+    monkeypatch.setattr(service, "datos_publicos_por_ids", contar)
+    esp = await crear_espacio(USH)
+    for hora in (9, 11, 13):
+        est = await crear_usuario(R.ESTUDIANTE, USH)
+        await crear_reserva(est, esp, inicio=time(hora, 0), fin=time(hora + 1, 0))
+    admin = await crear_usuario(R.ADMIN_LOCAL, USH)
+
+    r = await client.get(f"{B}/reservas", headers=auth(admin))
+    assert len(r.json()) == 3 and all(x["solicitante_nombre"] for x in r.json())
+    assert len(llamadas) == 1 and len(llamadas[0]) == 3
 
 async def test_usuario_dado_de_baja_conserva_reservas(db, crear_usuario, crear_espacio, crear_reserva):  # EC-28
     from sqlalchemy.exc import IntegrityError

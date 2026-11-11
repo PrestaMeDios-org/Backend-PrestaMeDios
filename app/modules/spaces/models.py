@@ -6,11 +6,13 @@ Mapean los contratos API-First de ``app/modules/spaces/schemas.py`` a las tablas
 mantenimiento, RES-04 / GLO-04).
 """
 
+import uuid
 from datetime import date, datetime, time
 from typing import Optional
 
 from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, Time, text
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -94,7 +96,12 @@ class ReservaEspacio(Base):
 
 
 class BloqueoEspacio(Base):
-    """Bloqueo administrativo de un espacio (mantenimiento/contingencia)."""
+    """Bloqueo administrativo de un espacio (mantenimiento/contingencia).
+
+    Nunca se borra (SPEC-08 D-S01, P7.3): deshacerlo completa ``revertido_en`` y
+    ``revertido_por``, y sólo los bloqueos sin ``revertido_en`` afectan la
+    disponibilidad. Las filas de un bloqueo general comparten ``id_grupo`` (D-S03).
+    """
 
     __tablename__ = "bloqueos_espacios"
 
@@ -109,4 +116,14 @@ class BloqueoEspacio(Base):
     motivo: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )
+    # 0018 (SPEC-08 v1.1.0, GLO-04): grupo del bloqueo general y reversión lógica.
+    id_grupo: Mapped[Optional[uuid.UUID]] = mapped_column(
+        PGUUID(as_uuid=True), nullable=True, index=True
+    )
+    revertido_en: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revertido_por: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("usuarios.id", ondelete="SET NULL"), nullable=True
     )
