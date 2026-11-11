@@ -212,6 +212,7 @@ class TestAltaDirecta:  # AC-14, UC-06
         "nombre": "Victoria",
         "apellido": "Admin",
         "dni": "28111222",
+        "telefono": "+54 2964 400100",
     }
 
     async def test_superadmin_crea_admin_local(self, client, db, crear_usuario):

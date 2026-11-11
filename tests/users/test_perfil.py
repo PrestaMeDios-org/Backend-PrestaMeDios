@@ -37,11 +37,13 @@ class TestEditarContacto:  # AC-46
         (h,) = await _historial(db, uid)
         assert h.cambios == {"telefono": [None, "+54 2964 111222"]} and h.actor_id == uid
 
-    async def test_borrar_telefono(self, client, crear_usuario):
+    async def test_no_se_puede_borrar_el_telefono(self, client, crear_usuario):
+        # Desde SPEC-09 (RN-88, USR-05) el teléfono se cambia pero no se borra; AC-116.
         u = await crear_usuario()
         await client.patch(ME, json={"telefono": "+54 2964 111222"}, headers=auth(u))
         r = await client.patch(ME, json={"telefono": None}, headers=auth(u))
-        assert r.status_code == 200 and r.json()["telefono"] is None
+        assert r.status_code == 422
+        assert (await client.get(ME, headers=auth(u))).json()["telefono"] == "+54 2964 111222"
 
     @pytest.mark.parametrize(
         "payload",
@@ -127,6 +129,7 @@ class TestCambioObligatorio:  # AC-48, EC-33
         "nombre": "Nora",
         "apellido": "Docente",
         "dni": "27111222",
+        "telefono": "+54 2901 400200",
         "rol": "DOCENTE",
         "sede": "Ushuaia",
     }
@@ -158,7 +161,7 @@ class TestCambioObligatorio:  # AC-48, EC-33
     async def test_cli_no_exige_cambio(self, db):
         datos = UsuarioAdminCreate(
             email="sa@untdf.edu.ar", password="Laboratorio2026", nombre="Sa", apellido="Admin",
-            dni="30111222", rol=RolUsuario.SUPERADMIN, sede=None,
+            dni="30111222", telefono="+54 2901 400300", rol=RolUsuario.SUPERADMIN, sede=None,
         )
         usuario, _ = await crear_superadmin(db, datos)
         assert usuario.debe_cambiar_password is False
