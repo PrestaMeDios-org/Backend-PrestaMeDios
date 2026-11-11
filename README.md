@@ -117,7 +117,9 @@ Definidas en `.env` (ver [`.env.example`](.env.example)). **Nunca versionar `.en
 
 Fechas y horas de reservas se interpretan en la zona del laboratorio, `America/Argentina/Ushuaia` (dependencia `tzdata`).
 
-Las **reglas operativas** del laboratorio (plazos de préstamo, horario, anticipación mínima, tolerancias) no son variables de entorno: se administran desde el Panel de Parámetros Globales (`/api/v1/config/parametros`) y se siembran con la migración `0005`.
+Las **reglas operativas** del laboratorio (plazos de préstamo, horario, anticipación mínima, tolerancias) no son variables de entorno: se administran desde el Panel de Parámetros Globales (`/api/v1/config/parametros`) y se siembran con las migraciones `0005` y `0017`.
+
+**Horario y correo de contacto por sede (SPEC-09 Fase A).** Cada sede tiene su horario y su correo de contacto: `horario.<sede>.apertura`, `horario.<sede>.cierre` y `contacto.<sede>.email`, con `<sede>` igual a `ushuaia` o `rio_grande`. Los otros módulos los leen con `app.modules.config.service.datos_de_sede(db, sede)` o `datos_de_sedes(db)`, que devuelven `DatosSede(sede, horario_apertura, horario_cierre, correo_contacto)` en una sola consulta y sin `commit` (`correo_contacto` es `None` mientras no se configure). El frontend usa `GET /api/v1/config/sedes`. Las claves globales `horario.apertura` y `horario.cierre` quedan obsoletas y no editables, y se borran cuando `spaces`, `loans` y el portal lean el horario de cada sede (DT-33).
 
 ---
 
@@ -182,6 +184,7 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | Configuración | `GET /api/v1/config/parametros[/{clave}]` | Parámetros operativos |
 | | `PUT /api/v1/config/parametros/{clave}` | Modificar (Superadministrador, con control de versión) |
 | | `GET /api/v1/config/parametros/{clave}/historial` | Historial de cambios |
+| | `GET /api/v1/config/sedes` | Horario y correo de contacto de cada sede (cualquier usuario autenticado) |
 | Inventario | `GET/POST /api/v1/inventory/categorias` | Categorías del catálogo |
 | | `GET /api/v1/inventory/equipamiento[/{id}]` | Catálogo con filtros `sede`, `categoria`, `q`. Estudiantes y docentes reciben una vista reducida (sin unidades ni series); `incluir_inactivos` sólo para administradores |
 | | `POST /api/v1/inventory/equipamiento` | Alta de equipamiento (plazo por defecto desde `prestamo.general.max_dias`, o `prestamo.notebook.max_dias` si `es_notebook`) |

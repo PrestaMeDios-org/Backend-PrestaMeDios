@@ -88,9 +88,10 @@ async def test_edicion_concurrente(client, crear_usuario):  # EC-19
         ("prestamo.general.max_dias", "4", "VALOR_PARAMETRO_INVALIDO"),
         ("prestamo.general.max_dias", 0, "VALOR_PARAMETRO_INVALIDO"),
         ("prestamo.general.max_dias", 16, "VALOR_PARAMETRO_INVALIDO"),
-        ("horario.cierre", "25:00", "VALOR_PARAMETRO_INVALIDO"),
-        ("horario.cierre", "9:00", "VALOR_PARAMETRO_INVALIDO"),
-        ("horario.apertura", "16:30", "PARAMETROS_INCONSISTENTES"),
+        # Desde SPEC-09 el horario se edita por sede; las claves globales son obsoletas (RN-81).
+        ("horario.ushuaia.cierre", "25:00", "VALOR_PARAMETRO_INVALIDO"),
+        ("horario.rio_grande.cierre", "9:00", "VALOR_PARAMETRO_INVALIDO"),
+        ("horario.ushuaia.apertura", "16:30", "PARAMETROS_INCONSISTENTES"),
         ("prestamo.notebook.max_dias", 3, "PARAMETROS_INCONSISTENTES"),
         ("reserva_espacio.anticipacion_max_dias", 1, "PARAMETROS_INCONSISTENTES"),
     ],

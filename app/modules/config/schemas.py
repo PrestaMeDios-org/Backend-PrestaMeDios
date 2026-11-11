@@ -1,10 +1,10 @@
 """Contratos API del Panel de Parámetros Globales (GLO-03, SPEC-01 §6.12–6.14)."""
 
-from datetime import datetime
+from datetime import datetime, time
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
-from app.core.enums import TipoParametro
+from app.core.enums import SedeEnum, TipoParametro
 
 ValorParametro = StrictBool | StrictInt | StrictFloat | StrictStr
 
@@ -52,3 +52,14 @@ class ParametroHistorialItem(BaseModel):
     motivo: str | None = Field(default=None, examples=["Temporada alta de rodajes."])
     actor_id: int | None = Field(default=None, examples=[1])
     created_at: datetime = Field(..., examples=["2026-10-07T14:00:00Z"])
+
+
+class DatosSedeResponse(BaseModel):
+    """Horario y correo de contacto de una sede (GLO-02, GLO-03; SPEC-09 §4.5)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    sede: SedeEnum = Field(..., examples=["Río Grande"])
+    horario_apertura: time = Field(..., examples=["10:00:00"])
+    horario_cierre: time = Field(..., examples=["17:00:00"])
+    correo_contacto: str | None = Field(default=None, examples=["laboratorio@example.com"])
