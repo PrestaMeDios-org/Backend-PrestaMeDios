@@ -582,16 +582,20 @@ class TestBloqueos:
 
     async def test_reversiones_simultaneas_del_mismo_grupo(
         self, client, crear_usuario, crear_espacio
-    ):  # RN-S16: una gana, la otra recibe 409
+    ):  # RN-S16: una gana, la otra recibe 409, sin deadlock
+        # Cada pedido usa su propia conexión. Se revierte desde filas distintas del mismo
+        # grupo, en varias rondas para darle chances a la carrera: si se bloqueara primero
+        # la fila pedida y después el resto del grupo, las dos se trabarían.
         superadmin = await crear_usuario(R.SUPERADMIN)
-        await crear_espacio(USH)
-        await crear_espacio(RG)
-        filas = await self._general(client, superadmin)
-        respuestas = await asyncio.gather(
-            self._revertir(client, superadmin, filas[0]["id_bloqueo"]),
-            self._revertir(client, superadmin, filas[1]["id_bloqueo"]),
-        )
-        assert sorted(r.status_code for r in respuestas) == [200, 409]
+        for sede in (USH, RG, USH, RG):
+            await crear_espacio(sede)
+        for ronda in range(5):
+            filas = await self._general(client, superadmin, f"Cierre {ronda}")
+            respuestas = await asyncio.gather(
+                self._revertir(client, superadmin, filas[0]["id_bloqueo"]),
+                self._revertir(client, superadmin, filas[-1]["id_bloqueo"]),
+            )
+            assert sorted(r.status_code for r in respuestas) == [200, 409], ronda
 
 
 # ── SPEC-08 K1: solicitante sólo para administradores (AC-S14, EC-S09, EC-S10) ──
