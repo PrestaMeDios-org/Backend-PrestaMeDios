@@ -453,6 +453,19 @@ async def listar_bloqueos(
     return list((await db.scalars(stmt.order_by(BloqueoEspacio.fecha_inicio))).all())
 
 
+async def eliminar_bloqueo(db: AsyncSession, actor: Usuario, id_bloqueo: int) -> None:
+    bloqueo = await db.get(BloqueoEspacio, id_bloqueo)
+    if bloqueo is None:
+        raise AppError(404, "BLOQUEO_NO_ENCONTRADO", "Bloqueo no encontrado.")
+    try:
+        await _espacio_en_alcance(db, actor, bloqueo.id_espacio)
+        await db.delete(bloqueo)
+        await db.commit()
+    except AppError:
+        await db.rollback()
+        raise
+
+
 # ── Disponibilidad (RES-01) ──────────────────────────────────────────────────
 
 

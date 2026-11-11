@@ -44,6 +44,7 @@ async def _estado(client, actor, reserva_id, **payload):
     [
         ("get", "/espacios"), ("post", "/espacios"), ("get", "/reservas"), ("post", "/reservas"),
         ("patch", "/reservas/1/estado"), ("get", "/bloqueos"), ("post", "/bloqueos"),
+        ("delete", "/bloqueos/1"),
         ("get", "/disponibilidad?fecha=2026-10-12"),
     ],
 )
@@ -410,6 +411,28 @@ class TestBloqueos:
         assert (await client.get(f"{B}/bloqueos", headers=auth(admin_ush))).json() == []
         assert len((await client.get(f"{B}/bloqueos", headers=auth(admin_rg))).json()) == 1
 
+
+    async def test_deshacer_bloqueo_y_validar_alcance(self, client, crear_usuario, crear_espacio):
+        admin_ush = await crear_usuario(R.ADMIN_LOCAL, USH)
+        admin_rg = await crear_usuario(R.ADMIN_LOCAL, RG)
+        esp_rg = await crear_espacio(RG)
+        creado = await client.post(
+            f"{B}/bloqueos", json=self._bloqueo(esp_rg), headers=auth(admin_rg)
+        )
+        id_bloqueo = creado.json()["id_bloqueo"]
+
+        docente = await crear_usuario(R.DOCENTE, RG)
+        sin_permiso = await client.delete(f"{B}/bloqueos/{id_bloqueo}", headers=auth(docente))
+        assert sin_permiso.status_code == 403
+
+        fuera_de_alcance = await client.delete(f"{B}/bloqueos/{id_bloqueo}", headers=auth(admin_ush))
+        assert fuera_de_alcance.status_code == 404
+
+        eliminado = await client.delete(f"{B}/bloqueos/{id_bloqueo}", headers=auth(admin_rg))
+        assert eliminado.status_code == 204
+        assert (await client.get(f"{B}/bloqueos", headers=auth(admin_rg))).json() == []
+        inexistente = await client.delete(f"{B}/bloqueos/{id_bloqueo}", headers=auth(admin_rg))
+        assert inexistente.status_code == 404
 
 async def test_usuario_dado_de_baja_conserva_reservas(db, crear_usuario, crear_espacio, crear_reserva):  # EC-28
     from sqlalchemy.exc import IntegrityError

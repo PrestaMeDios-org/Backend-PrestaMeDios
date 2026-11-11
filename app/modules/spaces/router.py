@@ -156,6 +156,20 @@ async def listar_bloqueos(
     return await service.listar_bloqueos(db, actor, id_espacio=id_espacio, fecha=fecha)
 
 
+@router.delete(
+    "/bloqueos/{id_bloqueo}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Deshacer un bloqueo",
+    responses=error_responses(401, 403, 404),
+)
+async def eliminar_bloqueo(
+    id_bloqueo: int,
+    actor: Usuario = Depends(_solo_admins),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    await service.eliminar_bloqueo(db, actor, id_bloqueo)
+
+
 # ── Disponibilidad (RES-01) ──────────────────────────────────────────────────
 
 
