@@ -6,6 +6,7 @@ transiciones de la orden).
 
 """
 
+import uuid
 from datetime import datetime
 
 from sqlalchemy import (
@@ -24,6 +25,7 @@ from sqlalchemy import (
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from sqlalchemy.dialects.postgresql import TSTZRANGE, ExcludeConstraint, Range
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import SedeEnum, enum_values
@@ -70,6 +72,11 @@ class OrdenPedido(Base):
         ForeignKey("usuarios.id", ondelete="SET NULL")
     )
     resuelto_en: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # PDF de aval de `files` para órdenes con alta gama (0016, RN-L09). `files` sólo
+    # marca el archivo como vinculado; la orden guarda cuál es el suyo.
+    aval_archivo_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("archivos.id", ondelete="RESTRICT")
+    )
 
     detalles: Mapped[list["DetallePrestamo"]] = relationship(
         back_populates="orden",

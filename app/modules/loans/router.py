@@ -12,13 +12,14 @@ documentan con ``error_responses(...)``. Dónde aparece cada código (§6.3):
     ``UNIDAD_NO_DISPONIBLE`` (la base rechazó un solapamiento, SQLSTATE 23P01).
 """
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_user, require_roles
 from app.core.enums import RolUsuario, SedeEnum
 from app.core.errors import error_responses
 from app.database import get_db
+from app.modules.files.service import respuesta_descarga
 from app.modules.loans import service
 from app.modules.loans.enums import EstadoOrdenEnum
 from app.modules.loans.models import OrdenPedido
@@ -158,6 +159,30 @@ async def unidades_libres_de_orden(
     de la jurisdicción del administrador responde 404.
     """
     return await service.unidades_libres_de_orden(db, actor, orden_id)
+
+
+@router.get(
+    "/ordenes/{orden_id}/aval",
+    response_class=Response,
+    summary="Descargar el PDF de aval de la orden",
+    responses={
+        200: {"content": {"application/pdf": {}}, "description": "El PDF de aval."},
+        **error_responses(401, 404),
+    },
+)
+async def descargar_aval(
+    orden_id: int,
+    actor: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    """El aval de alta gama (PRE-05), para el solicitante y los administradores con
+    jurisdicción, que lo revisan antes de aprobar (RN-60 de SPEC-03).
+
+    Cualquier otro caso, incluido el docente de la asignatura, responde 404; también
+    una orden sin aval. Se sirve con los encabezados comunes de ``files`` (RN-61).
+    """
+    contenido = await service.descargar_aval(db, actor, orden_id)
+    return respuesta_descarga(contenido)
 
 
 @router.patch(

@@ -23,6 +23,8 @@ from app.core.enums import RolUsuario, SedeEnum
 from app.core.errors import AppError
 from app.core.settings import ZONA_HORARIA_LAB, ahora_lab
 from app.modules.config.service import obtener_parametro
+from app.modules.files.enums import PropositoArchivo
+from app.modules.files.service import ArchivoContenido, abrir_archivo, vincular_archivo
 from app.modules.inventory.service import (
     bloquear_unidad,
     datos_equipamiento_por_ids,
@@ -827,10 +829,10 @@ async def crear_orden(db: AsyncSession, actor: Usuario, payload: OrdenPedidoCrea
     que deshacer. Solo el último paso escribe, y si falla se hace ``rollback``.
 
     Los datos de los ítems salen de ``inventory.datos_equipamiento_por_ids`` (C8), sin
-    leer sus modelos (P3.3). Primera versión (corte acordado mientras llega ``files``):
-    la renovación responde ``501`` y un ítem de alta gama responde
-    ``422 AVAL_REQUERIDO`` aunque traiga ``pdf_aval_id``, porque todavía no se
-    puede vincular el archivo.
+    leer sus modelos (P3.3). Con ítems de alta gama, el aval se vincula con
+    ``files.vincular_archivo`` en la misma transacción que crea la orden (RN-L09, K3):
+    si la creación falla, el archivo no queda vinculado. La renovación todavía
+    responde ``501`` (T1.14).
     """
     # 1. Rol y sede salen de la sesión (RN-L01, RN-L02); asignatura (RN-L07).
     if payload.renueva_detalle_id is not None:
@@ -866,15 +868,17 @@ async def crear_orden(db: AsyncSession, actor: Usuario, payload: OrdenPedidoCrea
         if item is None or not item.activo:
             raise equipamiento_no_encontrado(equipamiento_id)
 
-    # 5. Aval (RN-L09). Sin files en develop, la alta gama todavía no se puede pedir.
-    for equipamiento_id in modelos:
-        if datos[equipamiento_id].alta_gama:
-            raise AppError(
-                422,
-                "AVAL_REQUERIDO",
-                "Este equipo es de alta gama y requiere el aval en PDF.",
-                equipamiento_id=equipamiento_id,
-            )
+    # 5. Aval (RN-L09): obligatorio si hay alta gama. Sin alta gama, `pdf_aval_id` se
+    # ignora (no se vincula ni se guarda; `files` limpia los archivos huérfanos).
+    alta_gama = [m for m in modelos if datos[m].alta_gama]
+    if alta_gama and payload.pdf_aval_id is None:
+        raise AppError(
+            422,
+            "AVAL_REQUERIDO",
+            "Este equipo es de alta gama y requiere el aval en PDF.",
+            equipamiento_id=alta_gama[0],
+        )
+    aval_id = payload.pdf_aval_id if alta_gama else None
 
     # 6. Plazo por línea (RN-L06).
     for equipamiento_id in modelos:
@@ -892,6 +896,7 @@ async def crear_orden(db: AsyncSession, actor: Usuario, payload: OrdenPedidoCrea
         sede=sede,
         asignatura_id=payload.asignatura_id,
         estado=EstadoOrdenEnum.PENDIENTE,
+        aval_archivo_id=aval_id,
         detalles=[
             DetallePrestamo(
                 equipamiento_id=item.equipamiento_id,
@@ -905,9 +910,36 @@ async def crear_orden(db: AsyncSession, actor: Usuario, payload: OrdenPedidoCrea
     )
     db.add(orden)
     try:
+        if aval_id is not None:  # 422 ARCHIVO_INVALIDO si es ajeno, de otro tipo o ya usado
+            await vincular_archivo(
+                db, aval_id, propietario_id=actor.id, proposito=PropositoArchivo.AVAL_PRESTAMO
+            )
         await db.commit()
     except Exception:
         await db.rollback()
         raise
     await db.refresh(orden)  # fecha_solicitud la pone la base
     return orden
+
+
+# ── Aval de la orden (GET /ordenes/{id}/aval) ────────────────────────────────
+
+
+def aval_no_encontrado() -> AppError:
+    return AppError(404, "ARCHIVO_NO_ENCONTRADO", "Esta orden no tiene un aval para descargar.")
+
+
+async def descargar_aval(db: AsyncSession, actor: Usuario, orden_id: int) -> ArchivoContenido:
+    """El PDF de aval de la orden (AC-L60, RN-60 de SPEC-03).
+
+    Lo descargan el solicitante y los administradores con jurisdicción, con el mismo
+    alcance que el detalle (``_orden_con_alcance``). El docente de la asignatura no lo
+    descarga: no es dueño ni administrador. Sin aval, 404.
+    """
+    orden = await _orden_con_alcance(db, actor, orden_id)
+    if orden.aval_archivo_id is None:
+        raise aval_no_encontrado()
+    contenido = await abrir_archivo(db, orden.aval_archivo_id)
+    if contenido is None:
+        raise aval_no_encontrado()
+    return contenido
