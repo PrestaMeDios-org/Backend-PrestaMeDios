@@ -71,9 +71,10 @@ async def _parametros(db) -> dict[str, ParametroGlobal]:
 
 
 def test_encadena_con_la_cabeza_de_develop():  # D-22 de SPEC-03
-    # `0016_loans_aval` (SPEC-05 T1.12) entró a `develop` antes que esta migración (plan §8).
+    # `0018_spaces_bloqueos_reversion` (SPEC-08 v1.1.0) entró a `develop` antes que esta
+    # migración, así que la 0017 cuelga de ella: 0016 → 0018 → 0017 (plan §8).
     assert M.revision == "0017_config_sedes"
-    assert M.down_revision == "0016_loans_aval"
+    assert M.down_revision == "0018_spaces_bloqueos_reversion"
 
 
 async def test_upgrade_copia_el_horario_vigente(db):  # AC-102, D-03, D-05

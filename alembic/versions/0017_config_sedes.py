@@ -5,8 +5,12 @@ como obsoletos y no editables (RN-81, D-02). El horario de cada sede arranca con
 valor vigente de las claves globales, no con el de la semilla (D-03); los correos
 arrancan en ``""``, "sin configurar" (D-05).
 
+Cuelga de ``0018_spaces_bloqueos_reversion`` (SPEC-08 v1.1.0), que entró antes a
+``develop``: la que se mergea segunda reapunta su ``down_revision`` a la cabeza de
+``develop`` (D-22 de SPEC-03). Alembic encadena por id, no por número: 0016 → 0018 → 0017.
+
 Revision ID: 0017_config_sedes
-Revises: 0016_loans_aval
+Revises: 0018_spaces_bloqueos_reversion
 """
 
 import json
@@ -16,7 +20,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0017_config_sedes"
-down_revision: Union[str, None] = "0016_loans_aval"
+down_revision: Union[str, None] = "0018_spaces_bloqueos_reversion"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
