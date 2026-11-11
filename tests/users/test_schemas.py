@@ -19,6 +19,7 @@ BASE = {
     "nombre": "Lucía",
     "apellido": "Pérez",
     "dni": "40123456",
+    "telefono": "+54 2901 555123",
     "rol": "ESTUDIANTE",
     "sede": "Ushuaia",
 }

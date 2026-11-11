@@ -16,6 +16,7 @@ DATOS = UsuarioAdminCreate(
     nombre="Natalia",
     apellido="Ader",
     dni="30111222",
+    telefono="+54 2901 400400",
     rol=RolUsuario.SUPERADMIN,
     sede=None,
 )
