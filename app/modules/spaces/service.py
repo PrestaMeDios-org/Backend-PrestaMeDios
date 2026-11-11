@@ -540,22 +540,41 @@ async def revertir_bloqueo(
     - Una fila de un bloqueo general sólo la revierte el SUPERADMIN (``403``, EC-S11), y
       se revierten todas las filas activas del grupo en la misma transacción (EC-S12).
     - Ya revertido: ``409 TRANSICION_INVALIDA``.
-    - Las filas se leen con ``FOR UPDATE`` en orden de id: dos reversiones simultáneas
-      del mismo bloqueo o grupo se serializan y la segunda recibe ``409``.
+    - Las filas se bloquean con ``FOR UPDATE`` todas juntas y en orden de id, nunca
+      primero la fila pedida y después el resto del grupo: así dos reversiones
+      simultáneas desde filas distintas del mismo grupo no se traban (deadlock), se
+      serializan y la segunda recibe ``409``.
     - Las reservas existentes no cambian.
 
     Devuelve el bloqueo, o la lista de filas del grupo si era general.
     """
     del req  # la única transición posible es a ``Revertido``, y ya la validó el esquema
     try:
-        fila = await db.scalar(
-            select(BloqueoEspacio)
-            .where(BloqueoEspacio.id_bloqueo == id_bloqueo)
-            .with_for_update()
-            .execution_options(populate_existing=True)
+        # 1. Sin bloquear: ¿existe y a qué grupo pertenece? El grupo no cambia nunca.
+        id_grupo = await db.scalar(
+            select(BloqueoEspacio.id_grupo).where(BloqueoEspacio.id_bloqueo == id_bloqueo)
         )
+        # 2. Bloquear el bloqueo o el grupo entero, en orden de id (sin deadlocks).
+        objetivo = (
+            BloqueoEspacio.id_grupo == id_grupo
+            if id_grupo is not None
+            else BloqueoEspacio.id_bloqueo == id_bloqueo
+        )
+        filas = list(
+            (
+                await db.scalars(
+                    select(BloqueoEspacio)
+                    .where(objetivo)
+                    .order_by(BloqueoEspacio.id_bloqueo)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
+        )
+        fila = next((f for f in filas if f.id_bloqueo == id_bloqueo), None)
         if fila is None:
             raise _bloqueo_no_encontrado()
+        # 3. Controles con las filas ya bloqueadas.
         espacio = await db.get(Espacio, fila.id_espacio)
         if espacio is None or not puede_ver_sede(actor, espacio.sede):
             raise _bloqueo_no_encontrado()
@@ -567,19 +586,6 @@ async def revertir_bloqueo(
                 "TRANSICION_INVALIDA",
                 "El bloqueo ya fue revertido.",
                 estado_actual="Revertido",
-            )
-        filas = [fila]
-        if fila.id_grupo is not None:
-            filas = list(
-                (
-                    await db.scalars(
-                        select(BloqueoEspacio)
-                        .where(BloqueoEspacio.id_grupo == fila.id_grupo)
-                        .order_by(BloqueoEspacio.id_bloqueo)
-                        .with_for_update()
-                        .execution_options(populate_existing=True)
-                    )
-                ).all()
             )
     except AppError:
         await db.rollback()
