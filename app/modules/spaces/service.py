@@ -398,9 +398,14 @@ async def cambiar_estado_reserva(
 # ── Bloqueos (RES-04 / GLO-04) ───────────────────────────────────────────────
 
 
-async def crear_bloqueo(db: AsyncSession, actor: Usuario, datos: BloqueoEspacioCreate) -> BloqueoEspacio:
+async def _crear_bloqueos_en_espacios(
+    db: AsyncSession,
+    espacios: list[Espacio],
+    datos: BloqueoEspacioCreate | BloqueoEspacioGeneralCreate,
+) -> list[BloqueoEspacio]:
     try:
-        await _espacio_en_alcance(db, actor, datos.id_espacio, bloquear=True)
+        if not espacios:
+            raise AppError(404, "ESPACIOS_NO_ENCONTRADOS", "No hay espacios para bloquear.")
         if datos.hora_inicio is not None and datos.hora_fin is not None:
             apertura, cierre = await horario(db)
             if datos.hora_inicio < apertura or datos.hora_fin > cierre:
@@ -410,18 +415,36 @@ async def crear_bloqueo(db: AsyncSession, actor: Usuario, datos: BloqueoEspacioC
                     "El bloqueo debe estar dentro del horario del laboratorio "
                     f"({_fmt(apertura)}–{_fmt(cierre)}).",
                 )
+        ids_espacios = [espacio.id_espacio for espacio in espacios]
         activas = await db.scalars(
             select(ReservaEspacio).where(
-                ReservaEspacio.id_espacio == datos.id_espacio,
+                ReservaEspacio.id_espacio.in_(ids_espacios),
                 ReservaEspacio.fecha_reserva >= datos.fecha_inicio,
                 ReservaEspacio.fecha_reserva <= datos.fecha_fin,
                 ReservaEspacio.estado_reserva.in_(ESTADOS_ACTIVOS),
             )
         )
-        bloqueo = BloqueoEspacio(**datos.model_dump())
+        reservas_activas = list(activas.all())
+        bloqueos = [
+            BloqueoEspacio(
+                id_espacio=espacio.id_espacio,
+                fecha_inicio=datos.fecha_inicio,
+                fecha_fin=datos.fecha_fin,
+                hora_inicio=datos.hora_inicio,
+                hora_fin=datos.hora_fin,
+                motivo=datos.motivo,
+            )
+            for espacio in espacios
+        ]
+        bloqueos_por_espacio = {b.id_espacio: b for b in bloqueos}
         if any(
-            bloqueo_solapa(bloqueo, r.fecha_reserva, r.hora_inicio, r.hora_fin)
-            for r in activas.all()
+            bloqueo_solapa(
+                bloqueos_por_espacio[r.id_espacio],
+                r.fecha_reserva,
+                r.hora_inicio,
+                r.hora_fin,
+            )
+            for r in reservas_activas
         ):
             raise AppError(
                 409,
@@ -432,10 +455,36 @@ async def crear_bloqueo(db: AsyncSession, actor: Usuario, datos: BloqueoEspacioC
     except AppError:
         await db.rollback()
         raise
-    db.add(bloqueo)
+    db.add_all(bloqueos)
+    await db.flush()
     await db.commit()
-    await db.refresh(bloqueo)
-    return bloqueo
+    for bloqueo in bloqueos:
+        await db.refresh(bloqueo)
+    return bloqueos
+
+
+async def crear_bloqueo(
+    db: AsyncSession, actor: Usuario, datos: BloqueoEspacioCreate
+) -> BloqueoEspacio:
+    try:
+        espacio = await _espacio_en_alcance(db, actor, datos.id_espacio, bloquear=True)
+    except AppError:
+        await db.rollback()
+        raise
+    return (await _crear_bloqueos_en_espacios(db, [espacio], datos))[0]
+
+
+async def crear_bloqueo_general(
+    db: AsyncSession, actor: Usuario, datos: BloqueoEspacioGeneralCreate
+) -> list[BloqueoEspacio]:
+    if actor.rol != RolUsuario.SUPERADMIN:
+        raise permiso_insuficiente()
+    espacios = list(
+        (
+            await db.scalars(select(Espacio).order_by(Espacio.id_espacio).with_for_update())
+        ).all()
+    )
+    return await _crear_bloqueos_en_espacios(db, espacios, datos)
 
 
 async def listar_bloqueos(

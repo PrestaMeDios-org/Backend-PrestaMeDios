@@ -16,6 +16,7 @@ from app.modules.spaces import service
 from app.modules.spaces.models import BloqueoEspacio, Espacio, ReservaEspacio
 from app.modules.spaces.schemas import (
     BloqueoEspacioCreate,
+    BloqueoEspacioGeneralCreate,
     BloqueoEspacioResponse,
     DisponibilidadResponse,
     EspacioCreate,
@@ -139,6 +140,21 @@ async def crear_bloqueo(
     db: AsyncSession = Depends(get_db),
 ) -> BloqueoEspacio:
     return await service.crear_bloqueo(db, actor, payload)
+
+
+@router.post(
+    "/bloqueos/general",
+    response_model=list[BloqueoEspacioResponse],
+    status_code=status.HTTP_201_CREATED,
+    summary="Bloquear espacios de ambas sedes",
+    responses=error_responses(401, 403, 404, 409, 422),
+)
+async def crear_bloqueo_general(
+    payload: BloqueoEspacioGeneralCreate,
+    actor: Usuario = Depends(require_roles(RolUsuario.SUPERADMIN)),
+    db: AsyncSession = Depends(get_db),
+) -> list[BloqueoEspacio]:
+    return await service.crear_bloqueo_general(db, actor, payload)
 
 
 @router.get(

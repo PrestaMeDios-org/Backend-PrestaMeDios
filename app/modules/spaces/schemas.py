@@ -120,12 +120,11 @@ class ReservaEspacioUpdateStatus(BaseModel):
 # ── Bloqueo administrativo (RES-04 / GLO-04) ─────────────────────────────────
 
 
-class BloqueoEspacioCreate(BaseModel):
-    """Bloqueo de días completos (sin horas) o de una franja diaria."""
+class _BloqueoEspacioDatos(BaseModel):
+    """Datos compartidos para bloquear uno o varios espacios."""
 
     model_config = _INPUT_CONFIG
 
-    id_espacio: int = Field(..., examples=[3])
     fecha_inicio: date = Field(..., examples=["2026-10-12"])
     fecha_fin: date = Field(..., examples=["2026-10-14"])
     hora_inicio: Optional[time] = Field(default=None, examples=["09:00:00"])
@@ -133,7 +132,7 @@ class BloqueoEspacioCreate(BaseModel):
     motivo: str = Field(..., min_length=1, max_length=500, examples=["Mantenimiento eléctrico"])
 
     @model_validator(mode="after")
-    def _rango(self) -> "BloqueoEspacioCreate":
+    def _rango(self) -> "_BloqueoEspacioDatos":
         if self.fecha_fin < self.fecha_inicio:
             raise ValueError("`fecha_fin` no puede ser anterior a `fecha_inicio`.")
         if (self.hora_inicio is None) != (self.hora_fin is None):
@@ -143,6 +142,16 @@ class BloqueoEspacioCreate(BaseModel):
             if self.hora_fin <= self.hora_inicio:
                 raise ValueError("`hora_fin` debe ser posterior a `hora_inicio`.")
         return self
+
+
+class BloqueoEspacioCreate(_BloqueoEspacioDatos):
+    """Bloqueo de días completos o de una franja diaria en un espacio."""
+
+    id_espacio: int = Field(..., examples=[3])
+
+
+class BloqueoEspacioGeneralCreate(_BloqueoEspacioDatos):
+    """Bloqueo de días completos o de una franja diaria para todos los espacios."""
 
 
 class BloqueoEspacioResponse(BaseModel):

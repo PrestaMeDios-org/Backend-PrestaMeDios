@@ -44,6 +44,7 @@ async def _estado(client, actor, reserva_id, **payload):
     [
         ("get", "/espacios"), ("post", "/espacios"), ("get", "/reservas"), ("post", "/reservas"),
         ("patch", "/reservas/1/estado"), ("get", "/bloqueos"), ("post", "/bloqueos"),
+        ("post", "/bloqueos/general"),
         ("delete", "/bloqueos/1"),
         ("get", "/disponibilidad?fecha=2026-10-12"),
     ],
@@ -433,6 +434,54 @@ class TestBloqueos:
         assert (await client.get(f"{B}/bloqueos", headers=auth(admin_rg))).json() == []
         inexistente = await client.delete(f"{B}/bloqueos/{id_bloqueo}", headers=auth(admin_rg))
         assert inexistente.status_code == 404
+
+    async def test_bloqueo_general_solo_superadmin_y_en_ambas_sedes(
+        self, client, crear_usuario, crear_espacio
+    ):
+        superadmin = await crear_usuario(R.SUPERADMIN)
+        admin_local = await crear_usuario(R.ADMIN_LOCAL, USH)
+        espacios = [await crear_espacio(USH), await crear_espacio(RG)]
+        espacios.append(await crear_espacio(RG))
+        payload = {
+            "fecha_inicio": str(dia(3)),
+            "fecha_fin": str(dia(3)),
+            "motivo": "Cierre institucional",
+        }
+
+        denegado = await client.post(
+            f"{B}/bloqueos/general", json=payload, headers=auth(admin_local)
+        )
+        assert denegado.status_code == 403
+
+        creado = await client.post(
+            f"{B}/bloqueos/general", json=payload, headers=auth(superadmin)
+        )
+        assert creado.status_code == 201
+        assert {b["id_espacio"] for b in creado.json()} == {
+            espacio.id_espacio for espacio in espacios
+        }
+        assert all(b["id_espacio"] == espacio.id_espacio for b in creado.json())
+
+    async def test_bloqueo_general_es_atomico_si_hay_reserva_activa(
+        self, client, crear_usuario, crear_espacio, crear_reserva
+    ):
+        superadmin = await crear_usuario(R.SUPERADMIN)
+        estudiante = await crear_usuario(R.ESTUDIANTE, USH)
+        espacio_ush = await crear_espacio(USH)
+        await crear_espacio(RG)
+        await crear_reserva(estudiante, espacio_ush, fecha=dia(3), estado="Aprobada")
+        payload = {
+            "fecha_inicio": str(dia(3)),
+            "fecha_fin": str(dia(3)),
+            "motivo": "Cierre institucional",
+        }
+
+        respuesta = await client.post(
+            f"{B}/bloqueos/general", json=payload, headers=auth(superadmin)
+        )
+        assert respuesta.status_code == 409
+        bloqueos = await client.get(f"{B}/bloqueos", headers=auth(superadmin))
+        assert bloqueos.json() == []
 
 async def test_usuario_dado_de_baja_conserva_reservas(db, crear_usuario, crear_espacio, crear_reserva):  # EC-28
     from sqlalchemy.exc import IntegrityError
