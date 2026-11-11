@@ -7,7 +7,9 @@
   del espacio; la restricción GIST de PostgreSQL es la garantía final.
 """
 
-from datetime import date, datetime, time, timedelta
+import uuid
+from collections.abc import Sequence
+from datetime import UTC, date, datetime, time, timedelta
 
 from sqlalchemy import Select, select
 from sqlalchemy.exc import IntegrityError
@@ -32,7 +34,9 @@ from app.modules.spaces.models import BloqueoEspacio, Espacio, ReservaEspacio
 from app.modules.spaces.schemas import (
     ESTADOS_ACTIVOS,
     BloqueoEspacioCreate,
+    BloqueoEspacioGeneralCreate,
     BloqueoEspacioResponse,
+    BloqueoEspacioUpdateStatus,
     DisponibilidadResponse,
     EspacioCreate,
     EstadoReserva,
@@ -41,8 +45,10 @@ from app.modules.spaces.schemas import (
     IntervalosEspacio,
     ReservaEspacioCreate,
     ReservaEspacioUpdateStatus,
+    ReservaEspacioResponse,
 )
 from app.modules.users.models import Usuario
+from app.modules.users.service import datos_publicos_por_ids
 
 ER = EstadoReserva
 
@@ -89,8 +95,17 @@ def _transicion_invalida(actual: ER, nuevo: ER) -> AppError:
     )
 
 
+def _bloqueo_no_encontrado() -> AppError:
+    return AppError(404, "BLOQUEO_NO_ENCONTRADO", "Bloqueo no encontrado.")
+
+
 def _fmt(h: time) -> str:
     return h.strftime("%H:%M")
+
+
+def _bloqueo_activo():
+    """Sólo los bloqueos sin revertir afectan reservas y disponibilidad (SPEC-08 RN-S14)."""
+    return BloqueoEspacio.revertido_en.is_(None)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -127,6 +142,7 @@ async def _bloqueos_en_fecha(db: AsyncSession, id_espacio: int, fecha: date) -> 
             BloqueoEspacio.id_espacio == id_espacio,
             BloqueoEspacio.fecha_inicio <= fecha,
             BloqueoEspacio.fecha_fin >= fecha,
+            _bloqueo_activo(),
         )
     )
     return list(result.all())
@@ -259,8 +275,8 @@ async def listar_reservas(
     estado: ER | None,
     id_usuario: int | None,
     sede: SedeEnum | None,
-) -> list[ReservaEspacio]:
-    """Estudiante/Docente: sólo las propias. Admin: las de espacios de su alcance (RN-30)."""
+) -> list[ReservaEspacioResponse]:
+    """Lista reservas dentro del alcance e incluye datos públicos del solicitante (RES-03, RN-30)."""
     stmt = select(ReservaEspacio).join(Espacio, ReservaEspacio.id_espacio == Espacio.id_espacio)
     if _es_admin(actor):
         stmt = stmt.where(Espacio.sede.in_(resolver_alcance_sede(actor, sede)))
@@ -277,13 +293,40 @@ async def listar_reservas(
     stmt = stmt.order_by(
         ReservaEspacio.fecha_reserva, ReservaEspacio.hora_inicio, ReservaEspacio.id_reserva
     )
-    return list((await db.scalars(stmt)).all())
+    reservas = list((await db.scalars(stmt)).all())
+    return await respuestas_de_reservas(db, actor, reservas)
+
+
+async def respuestas_de_reservas(
+    db: AsyncSession, actor: Usuario, reservas: Sequence[ReservaEspacio]
+) -> list[ReservaEspacioResponse]:
+    """Respuestas de reservas con el solicitante sólo para administradores (D-S06, RN-S10).
+
+    Quien llama ya filtró por jurisdicción. Para un administrador se suman nombre y
+    apellido con una sola llamada a ``users.datos_publicos_por_ids`` para todo el
+    conjunto (EC-S10), nunca DNI, email ni teléfono (P6). Para el dueño los campos
+    quedan sin asignar y el router los omite (``response_model_exclude_unset``).
+    """
+    if not _es_admin(actor):
+        return [ReservaEspacioResponse.model_validate(r) for r in reservas]
+    if not reservas:
+        return []
+    datos = await datos_publicos_por_ids(db, {r.id_usuario for r in reservas})
+    resultado: list[ReservaEspacioResponse] = []
+    for r in reservas:
+        base = ReservaEspacioResponse.model_validate(r).model_dump()
+        persona = datos.get(r.id_usuario)
+        base["solicitante_nombre"] = persona.nombre if persona else None
+        base["solicitante_apellido"] = persona.apellido if persona else None
+        resultado.append(ReservaEspacioResponse.model_validate(base))
+    return resultado
 
 
 async def cambiar_estado_reserva(
     db: AsyncSession, actor: Usuario, id_reserva: int, req: ReservaEspacioUpdateStatus
-) -> ReservaEspacio:
-    """Transiciones de SPEC-02 §3.4 (RES-03, RES-05)."""
+) -> ReservaEspacioResponse:
+    """Transiciones de SPEC-02 §3.4 (RES-03, RES-05). Para un administrador, la
+    respuesta incluye el solicitante (SPEC-08 AC-S14)."""
     try:
         # Orden de bloqueo fijo (espacio → reserva), igual que al crear reservas y
         # bloqueos: evita deadlocks entre aprobaciones concurrentes del mismo espacio.
@@ -366,15 +409,26 @@ async def cambiar_estado_reserva(
         await db.rollback()
         raise _franja_ocupada() from exc
     await db.refresh(reserva)
-    return reserva
+    return (await respuestas_de_reservas(db, actor, [reserva]))[0]
 
 
 # ── Bloqueos (RES-04 / GLO-04) ───────────────────────────────────────────────
 
 
-async def crear_bloqueo(db: AsyncSession, actor: Usuario, datos: BloqueoEspacioCreate) -> BloqueoEspacio:
+async def _crear_bloqueos_en_espacios(
+    db: AsyncSession,
+    espacios: list[Espacio],
+    datos: BloqueoEspacioCreate | BloqueoEspacioGeneralCreate,
+    *,
+    id_grupo: uuid.UUID | None = None,
+) -> list[BloqueoEspacio]:
+    """Crea bloqueos para los espacios indicados sin solapar reservas activas (RES-04, GLO-04).
+
+    Todo o nada: si una sola reserva activa choca, no se crea ninguna fila (EC-S13).
+    """
     try:
-        await _espacio_en_alcance(db, actor, datos.id_espacio, bloquear=True)
+        if not espacios:
+            raise AppError(404, "ESPACIOS_NO_ENCONTRADOS", "No hay espacios para bloquear.")
         if datos.hora_inicio is not None and datos.hora_fin is not None:
             apertura, cierre = await horario(db)
             if datos.hora_inicio < apertura or datos.hora_fin > cierre:
@@ -384,18 +438,37 @@ async def crear_bloqueo(db: AsyncSession, actor: Usuario, datos: BloqueoEspacioC
                     "El bloqueo debe estar dentro del horario del laboratorio "
                     f"({_fmt(apertura)}–{_fmt(cierre)}).",
                 )
+        ids_espacios = [espacio.id_espacio for espacio in espacios]
         activas = await db.scalars(
             select(ReservaEspacio).where(
-                ReservaEspacio.id_espacio == datos.id_espacio,
+                ReservaEspacio.id_espacio.in_(ids_espacios),
                 ReservaEspacio.fecha_reserva >= datos.fecha_inicio,
                 ReservaEspacio.fecha_reserva <= datos.fecha_fin,
                 ReservaEspacio.estado_reserva.in_(ESTADOS_ACTIVOS),
             )
         )
-        bloqueo = BloqueoEspacio(**datos.model_dump())
+        reservas_activas = list(activas.all())
+        bloqueos = [
+            BloqueoEspacio(
+                id_espacio=espacio.id_espacio,
+                fecha_inicio=datos.fecha_inicio,
+                fecha_fin=datos.fecha_fin,
+                hora_inicio=datos.hora_inicio,
+                hora_fin=datos.hora_fin,
+                motivo=datos.motivo,
+                id_grupo=id_grupo,
+            )
+            for espacio in espacios
+        ]
+        bloqueos_por_espacio = {b.id_espacio: b for b in bloqueos}
         if any(
-            bloqueo_solapa(bloqueo, r.fecha_reserva, r.hora_inicio, r.hora_fin)
-            for r in activas.all()
+            bloqueo_solapa(
+                bloqueos_por_espacio[r.id_espacio],
+                r.fecha_reserva,
+                r.hora_inicio,
+                r.hora_fin,
+            )
+            for r in reservas_activas
         ):
             raise AppError(
                 409,
@@ -406,15 +479,46 @@ async def crear_bloqueo(db: AsyncSession, actor: Usuario, datos: BloqueoEspacioC
     except AppError:
         await db.rollback()
         raise
-    db.add(bloqueo)
+    db.add_all(bloqueos)
     await db.commit()
-    await db.refresh(bloqueo)
-    return bloqueo
+    for bloqueo in bloqueos:
+        await db.refresh(bloqueo)
+    return bloqueos
+
+
+async def crear_bloqueo(
+    db: AsyncSession, actor: Usuario, datos: BloqueoEspacioCreate
+) -> BloqueoEspacio:
+    try:
+        espacio = await _espacio_en_alcance(db, actor, datos.id_espacio, bloquear=True)
+    except AppError:
+        await db.rollback()
+        raise
+    return (await _crear_bloqueos_en_espacios(db, [espacio], datos))[0]
+
+
+async def crear_bloqueo_general(
+    db: AsyncSession, actor: Usuario, datos: BloqueoEspacioGeneralCreate
+) -> list[BloqueoEspacio]:
+    """Bloqueo institucional de todos los espacios de ambas sedes (GLO-04, RN-S15).
+
+    Sólo SUPERADMIN. Bloquea los espacios en orden de id (el mismo orden que el resto de
+    las escrituras) y crea una fila por espacio, todas con el mismo ``id_grupo`` (D-S03).
+    """
+    if actor.rol != RolUsuario.SUPERADMIN:
+        raise permiso_insuficiente()
+    espacios = list(
+        (
+            await db.scalars(select(Espacio).order_by(Espacio.id_espacio).with_for_update())
+        ).all()
+    )
+    return await _crear_bloqueos_en_espacios(db, espacios, datos, id_grupo=uuid.uuid4())
 
 
 async def listar_bloqueos(
     db: AsyncSession, actor: Usuario, *, id_espacio: int | None, fecha: date | None
 ) -> list[BloqueoEspacio]:
+    """Bloqueos activos y revertidos de las sedes del actor (RN-S14): el historial no se pierde."""
     stmt = (
         select(BloqueoEspacio)
         .join(Espacio, BloqueoEspacio.id_espacio == Espacio.id_espacio)
@@ -425,6 +529,70 @@ async def listar_bloqueos(
     if fecha is not None:
         stmt = stmt.where(BloqueoEspacio.fecha_inicio <= fecha, BloqueoEspacio.fecha_fin >= fecha)
     return list((await db.scalars(stmt.order_by(BloqueoEspacio.fecha_inicio))).all())
+
+
+async def revertir_bloqueo(
+    db: AsyncSession, actor: Usuario, id_bloqueo: int, req: BloqueoEspacioUpdateStatus
+) -> BloqueoEspacio | list[BloqueoEspacio]:
+    """Deshace un bloqueo sin borrarlo (GLO-04; SPEC-08 RN-S14…RN-S16, AC-S16).
+
+    - Fuera de la jurisdicción del actor, o si no existe: ``404 BLOQUEO_NO_ENCONTRADO``.
+    - Una fila de un bloqueo general sólo la revierte el SUPERADMIN (``403``, EC-S11), y
+      se revierten todas las filas activas del grupo en la misma transacción (EC-S12).
+    - Ya revertido: ``409 TRANSICION_INVALIDA``.
+    - Las filas se leen con ``FOR UPDATE`` en orden de id: dos reversiones simultáneas
+      del mismo bloqueo o grupo se serializan y la segunda recibe ``409``.
+    - Las reservas existentes no cambian.
+
+    Devuelve el bloqueo, o la lista de filas del grupo si era general.
+    """
+    del req  # la única transición posible es a ``Revertido``, y ya la validó el esquema
+    try:
+        fila = await db.scalar(
+            select(BloqueoEspacio)
+            .where(BloqueoEspacio.id_bloqueo == id_bloqueo)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if fila is None:
+            raise _bloqueo_no_encontrado()
+        espacio = await db.get(Espacio, fila.id_espacio)
+        if espacio is None or not puede_ver_sede(actor, espacio.sede):
+            raise _bloqueo_no_encontrado()
+        if fila.id_grupo is not None and actor.rol != RolUsuario.SUPERADMIN:
+            raise permiso_insuficiente()
+        if fila.revertido_en is not None:
+            raise AppError(
+                409,
+                "TRANSICION_INVALIDA",
+                "El bloqueo ya fue revertido.",
+                estado_actual="Revertido",
+            )
+        filas = [fila]
+        if fila.id_grupo is not None:
+            filas = list(
+                (
+                    await db.scalars(
+                        select(BloqueoEspacio)
+                        .where(BloqueoEspacio.id_grupo == fila.id_grupo)
+                        .order_by(BloqueoEspacio.id_bloqueo)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                ).all()
+            )
+    except AppError:
+        await db.rollback()
+        raise
+    ahora = datetime.now(UTC)
+    for f in filas:
+        if f.revertido_en is None:
+            f.revertido_en = ahora
+            f.revertido_por = actor.id
+    await db.commit()
+    for f in filas:
+        await db.refresh(f)
+    return filas if fila.id_grupo is not None else fila
 
 
 # ── Disponibilidad (RES-01) ──────────────────────────────────────────────────
@@ -468,6 +636,7 @@ async def disponibilidad(
             (
                 await db.scalars(
                     select(BloqueoEspacio).where(
+                        _bloqueo_activo(),
                         BloqueoEspacio.fecha_inicio <= fecha,
                         BloqueoEspacio.fecha_fin >= fecha,
                         BloqueoEspacio.id_espacio.in_(ids),
