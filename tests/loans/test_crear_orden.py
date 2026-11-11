@@ -4,8 +4,8 @@ Todo corre contra la base real: los datos de los ítems salen de
 `inventory.datos_equipamiento_por_ids` (C8) y la disponibilidad de
 `inventory.unidades_asignables`.
 
-Primera versión: sin aval (la alta gama responde `422 AVAL_REQUERIDO`) y sin renovación
-(responde 501). Las fechas son relativas a hoy para cumplir la anticipación mínima.
+El aval de alta gama se prueba en `test_aval.py`. La renovación todavía responde 501.
+Las fechas son relativas a hoy para cumplir la anticipación mínima.
 """
 
 from datetime import datetime, time
@@ -28,7 +28,6 @@ pytestmark = pytest.mark.integracion
 
 URL = "/api/v1/loans/ordenes"
 ESTUDIANTE, DOCENTE = RolUsuario.ESTUDIANTE, RolUsuario.DOCENTE
-AVAL = "3f2b6c1e-8a4d-4f7e-9b1a-2c5d7e9f0a1b"
 
 
 def _a(dias: int, hora: int, minuto: int = 0) -> datetime:
@@ -193,12 +192,11 @@ async def test_un_equipo_inactivo_responde_404(client, crear_usuario, equipo):
     assert r.json()["code"] == "EQUIPAMIENTO_NO_ENCONTRADO"
 
 
-@pytest.mark.parametrize("extra", [{}, {"pdf_aval_id": AVAL}])
-async def test_la_alta_gama_exige_aval(client, db, crear_usuario, equipo, extra):
-    # RN-L09. Sin `files` en develop, se rechaza aunque traiga el aval.
+async def test_la_alta_gama_sin_aval_se_rechaza(client, db, crear_usuario, equipo):
+    # AC-L14, RN-L09. Los casos con aval están en `test_aval.py`.
     ana = await crear_usuario(ESTUDIANTE)
     camara = await equipo(alta_gama=True)
-    r = await client.post(URL, json=_pedido(camara, **extra), headers=auth(ana))
+    r = await client.post(URL, json=_pedido(camara), headers=auth(ana))
     assert r.status_code == 422
     assert r.json()["code"] == "AVAL_REQUERIDO"
     assert r.json()["equipamiento_id"] == camara.id

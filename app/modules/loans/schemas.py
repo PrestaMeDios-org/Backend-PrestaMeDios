@@ -159,6 +159,13 @@ class OrdenPedidoResponse(BaseModel):
     observacion_docente: str | None = None
     motivo_resolucion: str | None = None
     es_renovado: bool = False
+    aval_archivo_id: UUID | None = Field(
+        default=None,
+        description=(
+            "PDF de aval de la orden (alta gama, PRE-05). Se descarga con "
+            "`GET /api/v1/loans/ordenes/{id}/aval`."
+        ),
+    )
     resuelto_en: AwareDatetime | None = Field(
         default=None, description="Cuándo se aprobó, rechazó o canceló. Vacío si sigue pendiente."
     )
