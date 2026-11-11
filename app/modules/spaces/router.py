@@ -99,7 +99,7 @@ async def listar_reservas(
     sede: SedeEnum | None = Query(default=None, description="Sólo administradores."),
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> list[ReservaEspacio]:
+) -> list[ReservaEspacioResponse]:
     """Estudiantes y docentes ven sólo las propias (RN-30)."""
     return await service.listar_reservas(
         db, actor, id_espacio=id_espacio, fecha=fecha, estado=estado,

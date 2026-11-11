@@ -41,8 +41,10 @@ from app.modules.spaces.schemas import (
     IntervalosEspacio,
     ReservaEspacioCreate,
     ReservaEspacioUpdateStatus,
+    ReservaEspacioResponse,
 )
 from app.modules.users.models import Usuario
+from app.modules.users.service import datos_publicos_por_ids
 
 ER = EstadoReserva
 
@@ -259,7 +261,7 @@ async def listar_reservas(
     estado: ER | None,
     id_usuario: int | None,
     sede: SedeEnum | None,
-) -> list[ReservaEspacio]:
+) -> list[ReservaEspacioResponse]:
     """Estudiante/Docente: sólo las propias. Admin: las de espacios de su alcance (RN-30)."""
     stmt = select(ReservaEspacio).join(Espacio, ReservaEspacio.id_espacio == Espacio.id_espacio)
     if _es_admin(actor):
@@ -277,7 +279,29 @@ async def listar_reservas(
     stmt = stmt.order_by(
         ReservaEspacio.fecha_reserva, ReservaEspacio.hora_inicio, ReservaEspacio.id_reserva
     )
-    return list((await db.scalars(stmt)).all())
+    reservas = list((await db.scalars(stmt)).all())
+    if not reservas:
+        return []
+
+    # Recolectar IDs únicos de solicitantes sin consultar duplicados (RN-35)
+    ids_usuarios = {r.id_usuario for r in reservas}
+    datos_usuarios = await datos_publicos_por_ids(db, ids_usuarios)
+
+    resultado: list[ReservaEspacioResponse] = []
+    for r in reservas:
+        usuario_info = datos_usuarios.get(r.id_usuario)
+        nombre = usuario_info.nombre if usuario_info else None
+        apellido = usuario_info.apellido if usuario_info else None
+
+        resultado.append(
+            ReservaEspacioResponse.model_validate(r).model_copy(
+                update={
+                    "solicitante_nombre": nombre,
+                    "solicitante_apellido": apellido,
+                },
+            )
+        )
+    return resultado
 
 
 async def cambiar_estado_reserva(

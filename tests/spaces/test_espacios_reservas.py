@@ -202,7 +202,7 @@ class TestValidacionesDeCreacion:  # AC-35
 
 
 async def test_privacidad_de_reservas(client, crear_usuario, crear_espacio, crear_reserva):
-    est = await crear_usuario(R.ESTUDIANTE, USH)
+    est = await crear_usuario(R.ESTUDIANTE, USH, nombre="Ana", apellido="Pérez")
     otro = await crear_usuario(R.ESTUDIANTE, USH)
     esp_ush = await crear_espacio(USH)
     esp_rg = await crear_espacio(RG, "Isla RG")
@@ -228,6 +228,9 @@ async def test_privacidad_de_reservas(client, crear_usuario, crear_espacio, crea
     admin = await crear_usuario(R.ADMIN_LOCAL, USH)
     r = await client.get(f"{B}/reservas", headers=auth(admin))
     assert len(r.json()) == 2 and all(x["id_espacio"] == esp_ush.id_espacio for x in r.json())
+    solicitud = next(x for x in r.json() if x["id_usuario"] == est.id)
+    assert solicitud["solicitante_nombre"] == "Ana"
+    assert solicitud["solicitante_apellido"] == "Pérez"
     r = await client.get(f"{B}/reservas", params={"id_usuario": otro.id}, headers=auth(admin))
     assert len(r.json()) == 1
 
