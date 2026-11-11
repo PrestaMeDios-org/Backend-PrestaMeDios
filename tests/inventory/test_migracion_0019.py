@@ -27,10 +27,10 @@ def _ejecutadas(migracion, paso, monkeypatch):
     return [c.args[0] for c in op.execute.call_args_list]
 
 
-def test_encadena_con_la_0018():
+def test_encadena_con_la_0017():
     migracion = _cargar()
     assert migracion.revision == "0019_inventory_categorias_base"
-    assert migracion.down_revision == "0018_spaces_bloqueos_reversion"
+    assert migracion.down_revision == "0017_config_sedes"
 
 
 def test_son_las_cinco_categorias_de_la_demo():
