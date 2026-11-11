@@ -50,7 +50,9 @@ async def _estado(client, actor, reserva_id, **payload):
     ],
 )
 async def test_exigen_sesion(client, db, metodo, ruta):  # AC-31
-    r = await getattr(client, metodo)(f"{B}{ruta}", **({"json": {}} if metodo != "get" else {}))
+    r = await getattr(client, metodo)(
+        f"{B}{ruta}", **({"json": {}} if metodo not in {"get", "delete"} else {})
+    )
     assert r.status_code == 401 and r.json()["code"] == "NO_AUTENTICADO"
 
 
@@ -286,19 +288,19 @@ class TestTransiciones:
         r = await _estado(client, otro, res.id_reserva, nuevo_estado="Cancelada")
         assert r.status_code == 404 and r.json()["code"] == "RESERVA_NO_ENCONTRADA"
 
-    async def test_dueno_no_cancela_pendiente_pasada(self, client, crear_usuario, crear_espacio, crear_reserva):
+    async def test_dueno_no_cancela_pasada(self, client, crear_usuario, crear_espacio, crear_reserva):
         est = await crear_usuario(R.ESTUDIANTE, USH)
         esp = await crear_espacio(USH)
-        res = await crear_reserva(est, esp, fecha=dia(-1), estado="Pendiente")
+        res = await crear_reserva(est, esp, fecha=dia(-1), estado="Aprobada")
         r = await _estado(client, est, res.id_reserva, nuevo_estado="Cancelada")
         assert r.status_code == 409 and r.json()["code"] == "TRANSICION_INVALIDA"
 
-    async def test_dueno_cancela_aprobada_aunque_inicio_haya_pasado(
+    async def test_dueno_cancela_aprobada_futura(
         self, client, crear_usuario, crear_espacio, crear_reserva
     ):
         est = await crear_usuario(R.ESTUDIANTE, USH)
         esp = await crear_espacio(USH)
-        res = await crear_reserva(est, esp, fecha=dia(-1), estado="Aprobada")
+        res = await crear_reserva(est, esp, fecha=dia(1), estado="Aprobada")
         r = await _estado(client, est, res.id_reserva, nuevo_estado="Cancelada")
         assert r.status_code == 200 and r.json()["estado_reserva"] == "Cancelada"
 
@@ -460,7 +462,6 @@ class TestBloqueos:
         assert {b["id_espacio"] for b in creado.json()} == {
             espacio.id_espacio for espacio in espacios
         }
-        assert all(b["id_espacio"] == espacio.id_espacio for b in creado.json())
 
     async def test_bloqueo_general_es_atomico_si_hay_reserva_activa(
         self, client, crear_usuario, crear_espacio, crear_reserva

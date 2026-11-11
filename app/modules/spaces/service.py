@@ -32,6 +32,7 @@ from app.modules.spaces.models import BloqueoEspacio, Espacio, ReservaEspacio
 from app.modules.spaces.schemas import (
     ESTADOS_ACTIVOS,
     BloqueoEspacioCreate,
+    BloqueoEspacioGeneralCreate,
     BloqueoEspacioResponse,
     DisponibilidadResponse,
     EspacioCreate,
@@ -262,7 +263,7 @@ async def listar_reservas(
     id_usuario: int | None,
     sede: SedeEnum | None,
 ) -> list[ReservaEspacioResponse]:
-    """Estudiante/Docente: sólo las propias. Admin: las de espacios de su alcance (RN-30)."""
+    """Lista reservas dentro del alcance e incluye datos públicos del solicitante (RES-03, RN-30)."""
     stmt = select(ReservaEspacio).join(Espacio, ReservaEspacio.id_espacio == Espacio.id_espacio)
     if _es_admin(actor):
         stmt = stmt.where(Espacio.sede.in_(resolver_alcance_sede(actor, sede)))
@@ -347,9 +348,7 @@ async def cambiar_estado_reserva(
             inicio = datetime.combine(
                 reserva.fecha_reserva, reserva.hora_inicio, tzinfo=ZONA_HORARIA_LAB
             )
-            if actual not in CANCELABLES_POR_DUENO or (
-                actual == ER.PENDIENTE and inicio <= ahora_lab()
-            ):  # EC-27: una aprobada sigue cancelable hasta pasar a En_Uso
+            if actual not in CANCELABLES_POR_DUENO or inicio <= ahora_lab():  # EC-27
                 raise _transicion_invalida(actual, nuevo)
 
         if nuevo in (ER.APROBADA, ER.EN_USO):
@@ -403,6 +402,7 @@ async def _crear_bloqueos_en_espacios(
     espacios: list[Espacio],
     datos: BloqueoEspacioCreate | BloqueoEspacioGeneralCreate,
 ) -> list[BloqueoEspacio]:
+    """Crea bloqueos para los espacios indicados sin solapar reservas activas (RES-04, GLO-04)."""
     try:
         if not espacios:
             raise AppError(404, "ESPACIOS_NO_ENCONTRADOS", "No hay espacios para bloquear.")
@@ -456,7 +456,6 @@ async def _crear_bloqueos_en_espacios(
         await db.rollback()
         raise
     db.add_all(bloqueos)
-    await db.flush()
     await db.commit()
     for bloqueo in bloqueos:
         await db.refresh(bloqueo)
@@ -477,6 +476,7 @@ async def crear_bloqueo(
 async def crear_bloqueo_general(
     db: AsyncSession, actor: Usuario, datos: BloqueoEspacioGeneralCreate
 ) -> list[BloqueoEspacio]:
+    """Aplica un bloqueo institucional a todos los espacios (GLO-04)."""
     if actor.rol != RolUsuario.SUPERADMIN:
         raise permiso_insuficiente()
     espacios = list(
@@ -503,6 +503,7 @@ async def listar_bloqueos(
 
 
 async def eliminar_bloqueo(db: AsyncSession, actor: Usuario, id_bloqueo: int) -> None:
+    """Deshace un bloqueo administrativo dentro del alcance del actor (RES-04)."""
     bloqueo = await db.get(BloqueoEspacio, id_bloqueo)
     if bloqueo is None:
         raise AppError(404, "BLOQUEO_NO_ENCONTRADO", "Bloqueo no encontrado.")

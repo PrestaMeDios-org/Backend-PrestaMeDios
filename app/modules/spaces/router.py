@@ -101,7 +101,7 @@ async def listar_reservas(
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ReservaEspacioResponse]:
-    """Estudiantes y docentes ven sólo las propias (RN-30)."""
+    """Estudiantes y docentes ven sólo las propias; se exponen datos del solicitante (RES-03, RN-30)."""
     return await service.listar_reservas(
         db, actor, id_espacio=id_espacio, fecha=fecha, estado=estado,
         id_usuario=id_usuario, sede=sede,
@@ -154,6 +154,7 @@ async def crear_bloqueo_general(
     actor: Usuario = Depends(require_roles(RolUsuario.SUPERADMIN)),
     db: AsyncSession = Depends(get_db),
 ) -> list[BloqueoEspacio]:
+    """Permite al Superadministrador bloquear espacios de ambas sedes (GLO-04)."""
     return await service.crear_bloqueo_general(db, actor, payload)
 
 
@@ -183,6 +184,7 @@ async def eliminar_bloqueo(
     actor: Usuario = Depends(_solo_admins),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    """Permite deshacer un bloqueo dentro del alcance administrativo (RES-04)."""
     await service.eliminar_bloqueo(db, actor, id_bloqueo)
 
 

@@ -96,8 +96,8 @@ class ReservaEspacioResponse(BaseModel):
     estado_reserva: EstadoReserva = Field(..., examples=["Pendiente"])
     motivo: Optional[str] = Field(default=None, examples=["Clase de práctica"])
     created_at: datetime = Field(..., examples=["2026-10-05T14:30:00Z"])
-    solicitante_nombre: Optional[str] = None
-    solicitante_apellido: Optional[str] = None
+    solicitante_nombre: Optional[str] = Field(default=None, examples=["Ana"])
+    solicitante_apellido: Optional[str] = Field(default=None, examples=["Pérez"])
 
 
 class ReservaEspacioUpdateStatus(BaseModel):
