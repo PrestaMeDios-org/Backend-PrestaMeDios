@@ -10,9 +10,10 @@ SPEC-02 §3.2:
 
 from datetime import date, datetime, time
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from app.core.enums import SedeEnum
 
@@ -83,7 +84,13 @@ class ReservaEspacioCreate(BaseModel):
 
 
 class ReservaEspacioResponse(BaseModel):
-    """Reserva visible para su dueño o para un administrador con jurisdicción."""
+    """Reserva visible para su dueño o para un administrador con jurisdicción.
+
+    ``solicitante_nombre`` y ``solicitante_apellido`` sólo llegan en respuestas a un
+    administrador con jurisdicción (SPEC-08 D-S06, RN-S10, P6). Para el dueño quedan
+    sin asignar y los endpoints responden con ``response_model_exclude_unset``, así
+    que las claves no aparecen (no son ``null``). La disponibilidad nunca las usa.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -96,8 +103,12 @@ class ReservaEspacioResponse(BaseModel):
     estado_reserva: EstadoReserva = Field(..., examples=["Pendiente"])
     motivo: Optional[str] = Field(default=None, examples=["Clase de práctica"])
     created_at: datetime = Field(..., examples=["2026-10-05T14:30:00Z"])
-    solicitante_nombre: Optional[str] = Field(default=None, examples=["Ana"])
-    solicitante_apellido: Optional[str] = Field(default=None, examples=["Pérez"])
+    solicitante_nombre: Optional[str] = Field(
+        default=None, examples=["Ana"], description="Sólo para administradores con jurisdicción."
+    )
+    solicitante_apellido: Optional[str] = Field(
+        default=None, examples=["Pérez"], description="Sólo para administradores con jurisdicción."
+    )
 
 
 class ReservaEspacioUpdateStatus(BaseModel):
@@ -151,7 +162,24 @@ class BloqueoEspacioCreate(_BloqueoEspacioDatos):
 
 
 class BloqueoEspacioGeneralCreate(_BloqueoEspacioDatos):
-    """Bloqueo de días completos o de una franja diaria para todos los espacios."""
+    """Bloqueo de días completos o de una franja diaria para todos los espacios de ambas
+    sedes (GLO-04, SPEC-08 RN-S15). Sólo SUPERADMIN; las filas comparten ``id_grupo``."""
+
+
+class EstadoBloqueo(str, Enum):
+    """Estado derivado de un bloqueo (SPEC-08 D-S01): no se persiste."""
+
+    ACTIVO = "Activo"
+    REVERTIDO = "Revertido"
+
+
+class BloqueoEspacioUpdateStatus(BaseModel):
+    """Deshacer un bloqueo (GLO-04, SPEC-08 RN-S14). El servidor completa
+    ``revertido_en`` y ``revertido_por``; la única transición es a ``Revertido``."""
+
+    model_config = _INPUT_CONFIG
+
+    nuevo_estado: Literal[EstadoBloqueo.REVERTIDO] = Field(..., examples=["Revertido"])
 
 
 class BloqueoEspacioResponse(BaseModel):
@@ -165,6 +193,19 @@ class BloqueoEspacioResponse(BaseModel):
     hora_fin: Optional[time] = Field(default=None, examples=[None])
     motivo: str = Field(..., examples=["Feriado"])
     created_at: datetime = Field(..., examples=["2026-10-05T14:30:00Z"])
+    id_grupo: Optional[UUID] = Field(
+        default=None,
+        examples=["5f0c6a4e-2b1d-4c8a-9f3e-7d2a1b0c9e8f"],
+        description="Compartido por las filas de un bloqueo general; vacío si es individual.",
+    )
+    revertido_en: Optional[datetime] = Field(default=None, examples=[None])
+    revertido_por: Optional[int] = Field(default=None, examples=[None])
+
+    @computed_field(examples=["Activo"])  # type: ignore[prop-decorator]
+    @property
+    def estado(self) -> EstadoBloqueo:
+        """``Revertido`` si alguien lo deshizo; si no, ``Activo``."""
+        return EstadoBloqueo.ACTIVO if self.revertido_en is None else EstadoBloqueo.REVERTIDO
 
 
 # ── Disponibilidad (RES-01) ──────────────────────────────────────────────────

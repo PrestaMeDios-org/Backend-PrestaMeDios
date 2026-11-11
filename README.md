@@ -190,8 +190,8 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | | `GET /api/v1/inventory/unidades` · `PATCH …/{id}` | Stock de la jurisdicción; edición de serie, código y locker (1–7) |
 | | `PATCH /api/v1/inventory/unidades/{id}/estado` | `disponible` ⇄ `mantenimiento`, y `baja` (definitiva). `prestado` lo gestiona sólo `loans` mediante `app/modules/inventory/service.py` |
 | Espacios | `GET/POST /api/v1/spaces/espacios` | Espacios reservables |
-| | `GET/POST /api/v1/spaces/reservas` · `PATCH …/{id}/estado` | Solicitudes y su ciclo de vida |
-| | `GET/POST /api/v1/spaces/bloqueos` | Bloqueos administrativos |
+| | `GET/POST /api/v1/spaces/reservas` · `PATCH …/{id}/estado` | Solicitudes y su ciclo de vida; nombre y apellido del solicitante sólo para administradores (SPEC-08 D-S06) |
+| | `GET/POST /api/v1/spaces/bloqueos` · `POST …/bloqueos/general` · `PATCH …/bloqueos/{id}/estado` | Bloqueos administrativos; el general (sólo SUPERADMIN) abarca ambas sedes y se revierte entero; revertir no borra el registro (SPEC-08 v1.1.0) |
 | | `GET /api/v1/spaces/disponibilidad` | Franjas libres y ocupadas por fecha |
 | Comunicados | `GET /api/v1/notifications/comunicados[/{id}]` | Comunicados de la sede del usuario más los globales. Estudiantes y docentes ven sólo los vigentes; `sede` sólo para el Superadministrador e `incluir_archivados` sólo para administradores |
 | | `POST /api/v1/notifications/comunicados` | Publicar. `ADMIN_LOCAL`: en su sede. `SUPERADMIN`: `sede` o `es_global` (uno de los dos) |

@@ -18,6 +18,7 @@ from app.modules.spaces.schemas import (
     BloqueoEspacioCreate,
     BloqueoEspacioGeneralCreate,
     BloqueoEspacioResponse,
+    BloqueoEspacioUpdateStatus,
     DisponibilidadResponse,
     EspacioCreate,
     EspacioResponse,
@@ -73,6 +74,7 @@ async def crear_espacio(
 @router.post(
     "/reservas",
     response_model=ReservaEspacioResponse,
+    response_model_exclude_unset=True,
     status_code=status.HTTP_201_CREATED,
     summary="Solicitar una reserva",
     responses=error_responses(401, 403, 404, 409, 422),
@@ -89,6 +91,7 @@ async def crear_reserva(
 @router.get(
     "/reservas",
     response_model=list[ReservaEspacioResponse],
+    response_model_exclude_unset=True,
     summary="Listar reservas (propias o de la jurisdicción)",
     responses=error_responses(401, 403),
 )
@@ -101,7 +104,8 @@ async def listar_reservas(
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[ReservaEspacioResponse]:
-    """Estudiantes y docentes ven sólo las propias; se exponen datos del solicitante (RES-03, RN-30)."""
+    """Estudiantes y docentes ven sólo las propias (RES-03, RN-30). Para un administrador
+    con jurisdicción se suman nombre y apellido del solicitante (SPEC-08 AC-S14, P6)."""
     return await service.listar_reservas(
         db, actor, id_espacio=id_espacio, fecha=fecha, estado=estado,
         id_usuario=id_usuario, sede=sede,
@@ -111,6 +115,7 @@ async def listar_reservas(
 @router.patch(
     "/reservas/{id_reserva}/estado",
     response_model=ReservaEspacioResponse,
+    response_model_exclude_unset=True,
     summary="Aprobar, rechazar, cancelar, registrar uso o finalizar una reserva",
     responses=error_responses(401, 403, 404, 409, 422),
 )
@@ -119,7 +124,7 @@ async def actualizar_estado_reserva(
     payload: ReservaEspacioUpdateStatus,
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> ReservaEspacio:
+) -> ReservaEspacioResponse:
     """El dueño puede cancelar (RES-03); el resto de las transiciones son administrativas (RES-05)."""
     return await service.cambiar_estado_reserva(db, actor, id_reserva, payload)
 
@@ -154,7 +159,8 @@ async def crear_bloqueo_general(
     actor: Usuario = Depends(require_roles(RolUsuario.SUPERADMIN)),
     db: AsyncSession = Depends(get_db),
 ) -> list[BloqueoEspacio]:
-    """Permite al Superadministrador bloquear espacios de ambas sedes (GLO-04)."""
+    """Sólo el Superadministrador: una fila por espacio de ambas sedes, con el mismo
+    ``id_grupo``; si un espacio no se puede bloquear, no se crea ninguna (GLO-04, AC-S15)."""
     return await service.crear_bloqueo_general(db, actor, payload)
 
 
@@ -170,22 +176,27 @@ async def listar_bloqueos(
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[BloqueoEspacio]:
+    """Activos y revertidos, con su ``estado`` (SPEC-08 RN-S14)."""
     return await service.listar_bloqueos(db, actor, id_espacio=id_espacio, fecha=fecha)
 
 
-@router.delete(
-    "/bloqueos/{id_bloqueo}",
-    status_code=status.HTTP_204_NO_CONTENT,
+@router.patch(
+    "/bloqueos/{id_bloqueo}/estado",
+    response_model=BloqueoEspacioResponse | list[BloqueoEspacioResponse],
     summary="Deshacer un bloqueo",
-    responses=error_responses(401, 403, 404),
+    responses=error_responses(401, 403, 404, 409, 422),
 )
-async def eliminar_bloqueo(
+async def revertir_bloqueo(
     id_bloqueo: int,
+    payload: BloqueoEspacioUpdateStatus,
     actor: Usuario = Depends(_solo_admins),
     db: AsyncSession = Depends(get_db),
-) -> None:
-    """Permite deshacer un bloqueo dentro del alcance administrativo (RES-04)."""
-    await service.eliminar_bloqueo(db, actor, id_bloqueo)
+) -> BloqueoEspacio | list[BloqueoEspacio]:
+    """Deshace un bloqueo sin borrarlo: queda ``Revertido`` con quién y cuándo (GLO-04,
+    SPEC-08 AC-S16). Un ADMIN_LOCAL revierte sólo bloqueos individuales de su sede; una
+    fila de un bloqueo general la revierte sólo el SUPERADMIN, y se revierte el grupo
+    entero (la respuesta es la lista de filas). Las reservas existentes no cambian."""
+    return await service.revertir_bloqueo(db, actor, id_bloqueo, payload)
 
 
 # ── Disponibilidad (RES-01) ──────────────────────────────────────────────────
