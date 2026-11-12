@@ -56,13 +56,39 @@ class TestJwt:
         token, expires_in = crear_access_token(
             usuario_id=42, rol=RolUsuario.ADMIN_LOCAL, sede=SedeEnum.RIO_GRANDE, token_version=3
         )
-        assert expires_in == 3600
+        assert expires_in == get_settings().jwt_access_token_expire_minutes * 60
         claims = jwt.decode(token, options={"verify_signature": False})
-        assert set(claims) == {"sub", "rol", "sede", "tv", "iss", "iat", "exp", "jti"}
+        assert set(claims) == {
+            "sub", "rol", "sede", "tv", "iss", "iat", "auth_time", "exp", "jti"
+        }
         assert claims["sub"] == "42" and claims["rol"] == "ADMIN_LOCAL"
         assert claims["sede"] == "Río Grande" and claims["tv"] == 3
+        assert claims["auth_time"] == claims["iat"]  # sin auth_time explícito: el login
         payload = decodificar_token(token)
-        assert (payload.sub, payload.tv) == (42, 3)
+        assert (payload.sub, payload.tv, payload.auth_time) == (42, 3, claims["iat"])
+
+    def test_auth_time_explicito_se_conserva(self):  # RN-65
+        inicio = int((datetime.now(UTC) - timedelta(hours=2)).timestamp())
+        token, _ = crear_access_token(
+            usuario_id=5,
+            rol=RolUsuario.ESTUDIANTE,
+            sede=SedeEnum.USHUAIA,
+            token_version=0,
+            auth_time=inicio,
+        )
+        claims = jwt.decode(token, options={"verify_signature": False})
+        assert claims["auth_time"] == inicio and claims["iat"] > inicio
+        assert decodificar_token(token).auth_time == inicio
+
+    def test_sin_auth_time_usa_iat(self):  # RN-68
+        iat = int((datetime.now(UTC) - timedelta(minutes=1)).timestamp())
+        assert decodificar_token(_token(iat=iat)).auth_time == iat
+
+    @pytest.mark.parametrize("valor", ["123", None, True, [1]])
+    def test_auth_time_no_numerico(self, valor):
+        with pytest.raises(AppError) as exc:
+            decodificar_token(_token(auth_time=valor))
+        assert _codigo(exc) == "TOKEN_INVALIDO"
 
     def test_superadmin_sede_null(self):
         token, _ = crear_access_token(
@@ -108,6 +134,14 @@ class TestJwt:
 
 
 class TestSettings:
+    def test_vida_del_token_y_tope_de_sesion_por_defecto(self, monkeypatch: pytest.MonkeyPatch):
+        # SPEC-03 RN-65, RN-66: 30 minutos y 8 horas si el entorno no dice otra cosa.
+        monkeypatch.delenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", raising=False)
+        monkeypatch.delenv("JWT_SESION_MAX_HORAS", raising=False)
+        settings = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert settings.jwt_access_token_expire_minutes == 30
+        assert settings.jwt_sesion_max_horas == 8
+
     def test_secreto_obligatorio_y_largo(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("JWT_SECRET_KEY", "corto")
         with pytest.raises(ValidationError):

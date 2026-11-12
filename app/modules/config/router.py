@@ -12,10 +12,29 @@ from app.core.errors import error_responses
 from app.database import get_db
 from app.modules.config import service
 from app.modules.config.models import ParametroGlobal, ParametroGlobalHistorial
-from app.modules.config.schemas import ParametroHistorialItem, ParametroResponse, ParametroUpdate
+from app.modules.config.schemas import (
+    DatosSedeResponse,
+    ParametroHistorialItem,
+    ParametroResponse,
+    ParametroUpdate,
+)
 from app.modules.users.models import Usuario
 
 router = APIRouter()
+
+
+@router.get(
+    "/sedes",
+    response_model=list[DatosSedeResponse],
+    summary="Horario y correo de contacto de cada sede",
+    responses=error_responses(401),
+    dependencies=[Depends(get_current_user)],
+)
+async def listar_sedes(db: AsyncSession = Depends(get_db)) -> list[service.DatosSede]:
+    """Horario de atención y correo de contacto de cada sede, en el orden de ``SedeEnum``
+    (GLO-02, GLO-03; SPEC-09 RN-83). No son datos personales: cualquier usuario
+    autenticado ve las dos sedes (EC-56)."""
+    return list((await service.datos_de_sedes(db)).values())
 
 
 @router.get(

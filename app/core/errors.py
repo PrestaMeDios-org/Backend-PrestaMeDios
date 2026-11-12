@@ -61,5 +61,6 @@ def error_responses(*codes: int) -> dict[int | str, dict[str, Any]]:
         404: "Recurso inexistente o fuera de alcance.",
         409: "Conflicto de estado, unicidad o concurrencia.",
         422: "Datos inválidos.",
+        429: "Demasiados pedidos en poco tiempo.",
     }
     return {c: {"model": ErrorNegocio, "description": descripciones[c]} for c in codes}

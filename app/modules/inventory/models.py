@@ -6,7 +6,7 @@ Tablas: ``categorias``, ``equipamientos`` (catálogo) y ``unidades_fisicas``
 
 from enum import Enum
 
-from sqlalchemy import CheckConstraint, ForeignKey, String, false, text
+from sqlalchemy import CheckConstraint, ForeignKey, String, false, text, true
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -51,6 +51,8 @@ class Equipamiento(Base):
     descripcion: Mapped[str | None] = mapped_column(String(500))
     max_dias_prestamo: Mapped[int] = mapped_column(default=4, server_default=text("4"))
     alta_gama: Mapped[bool] = mapped_column(default=False, server_default=false())
+    es_notebook: Mapped[bool] = mapped_column(default=False, server_default=false())
+    activo: Mapped[bool] = mapped_column(default=True, server_default=true())
     imagen_url: Mapped[str | None] = mapped_column(String(500))
     video_url: Mapped[str | None] = mapped_column(String(500))
     reglas_cuidado: Mapped[list[str]] = mapped_column(
@@ -69,7 +71,9 @@ class UnidadFisica(Base):
     """Existencia física individual asociada a un ítem del catálogo."""
 
     __tablename__ = "unidades_fisicas"
-    __table_args__ = (CheckConstraint("locker >= 1", name="locker_positivo"),)
+    __table_args__ = (
+        CheckConstraint("locker IS NULL OR locker BETWEEN 1 AND 7", name="locker_rango"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     equipamiento_id: Mapped[int] = mapped_column(

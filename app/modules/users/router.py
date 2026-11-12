@@ -4,18 +4,29 @@
 - ``users_router`` → montado en ``/api/v1/users`` (USR-04, USR-05, GLO-01).
 """
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_current_user_permitiendo_cambio, require_roles
+from app.core.deps import (
+    SesionActual,
+    get_current_user_permitiendo_cambio,
+    get_sesion_actual,
+    get_sesion_operativa,
+    require_roles,
+)
 from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum
 from app.core.errors import error_responses
 from app.database import get_db
+from app.modules.files.router import content_length
 from app.modules.users import service
 from app.modules.users.models import Usuario
 from app.modules.users.schemas import (
     CambioEstadoRequest,
     CambioPasswordRequest,
+    ConfirmacionRecuperacion,
+    MENSAJE_RECUPERACION_NEUTRO,
+    MensajeResponse,
+    SolicitudRecuperacion,
     PerfilUpdate,
     UsuarioAdminUpdate,
     LoginRequest,
@@ -117,6 +128,125 @@ async def cambiar_password(
         expires_in=sesion.expires_in,
         usuario=UsuarioPublico.model_validate(sesion.usuario),
     )
+
+
+def _token_response(sesion: service.Sesion) -> TokenResponse:
+    return TokenResponse(
+        access_token=sesion.access_token,
+        expires_in=sesion.expires_in,
+        usuario=UsuarioPublico.model_validate(sesion.usuario),
+    )
+
+
+@auth_router.post(
+    "/renovar",
+    response_model=TokenResponse,
+    summary="Renovar el access token de la sesión actual",
+    responses=error_responses(401),
+)
+async def renovar(sesion: SesionActual = Depends(get_sesion_actual)) -> TokenResponse:
+    """Cambia un token vigente por otro nuevo con el mismo inicio de sesión (D-06 de SPEC-01).
+
+    Disponible aun con cambio obligatorio de contraseña pendiente. Pasadas
+    ``JWT_SESION_MAX_HORAS`` desde el login responde ``401 TOKEN_SESION_MAXIMA`` y hay que
+    volver a iniciar sesión (SPEC-03 RN-65…RN-68).
+    """
+    return _token_response(service.renovar_sesion(sesion))
+
+
+@auth_router.post(
+    "/me/sesiones/cerrar",
+    response_model=TokenResponse,
+    summary="Cerrar todas mis sesiones",
+    responses=error_responses(401, 403),
+)
+async def cerrar_sesiones(
+    sesion: SesionActual = Depends(get_sesion_operativa),
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    """Invalida todos los tokens emitidos y devuelve uno nuevo para esta pestaña (SPEC-03 RN-69).
+
+    Sirve para cerrar una sesión olvidada en una computadora compartida (D-14).
+    """
+    return _token_response(await service.cerrar_sesiones(db, sesion))
+
+
+@auth_router.put(
+    "/me/foto",
+    response_model=UsuarioPublico,
+    summary="Subir o reemplazar mi foto de perfil",
+    responses=error_responses(401, 403, 422),
+)
+async def subir_foto(
+    archivo: UploadFile = File(..., description="JPEG, PNG o WebP de hasta 2 MB."),
+    largo: int | None = Depends(content_length),
+    usuario: Usuario = Depends(_sesion_activa),
+    db: AsyncSession = Depends(get_db),
+) -> Usuario:
+    """Se guarda como JPEG de hasta 512 px sin metadatos y reemplaza a la anterior (USR-03).
+
+    El tipo se decide por los bytes (RN-55); la foto anterior se borra (RN-59).
+    """
+    return await service.reemplazar_foto(db, usuario, archivo, content_length=largo)
+
+
+@auth_router.delete(
+    "/me/foto",
+    response_model=UsuarioPublico,
+    summary="Quitar mi foto de perfil",
+    responses=error_responses(401, 403),
+)
+async def quitar_foto(
+    usuario: Usuario = Depends(_sesion_activa),
+    db: AsyncSession = Depends(get_db),
+) -> Usuario:
+    """Deja ``foto_id = null`` y borra el archivo (USR-03, RN-59)."""
+    return await service.quitar_foto(db, usuario)
+
+
+@auth_router.post(
+    "/recuperacion",
+    response_model=MensajeResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Pedir un enlace para restablecer la contraseña",
+    responses=error_responses(422, 429),
+)
+async def solicitar_recuperacion(
+    payload: SolicitudRecuperacion,
+    request: Request,
+    tareas: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> MensajeResponse:
+    """Público (excepción a P4.1). Responde lo mismo exista o no la cuenta (USR-02, RN-44).
+
+    El correo se manda después de responder, para que el tiempo no delate la cuenta
+    (RN-72, NFR-20). Límite por email y por IP en la última hora (RN-49).
+    """
+    ip = request.client.host if request.client else "desconocida"  # RN-54
+    pendiente = await service.solicitar_recuperacion(db, payload.email, ip)
+    if pendiente is not None:
+        tareas.add_task(service.enviar_correo_recuperacion, pendiente)
+    return MensajeResponse(detail=MENSAJE_RECUPERACION_NEUTRO)
+
+
+
+@auth_router.post(
+    "/recuperacion/confirmar",
+    response_model=MensajeResponse,
+    summary="Restablecer la contraseña con el enlace recibido",
+    responses=error_responses(422),
+)
+async def confirmar_recuperacion(
+    payload: ConfirmacionRecuperacion, db: AsyncSession = Depends(get_db)
+) -> MensajeResponse:
+    """Público (excepción a P4.1). Cierra todas las sesiones y no inicia una nueva (RN-52).
+
+    Token inexistente, vencido, usado o de una cuenta no activa: ``422
+    TOKEN_RECUPERACION_INVALIDO`` (RN-51). El token viaja en el cuerpo, nunca en la URL
+    (RN-47).
+    """
+    await service.confirmar_recuperacion(db, payload.token, payload.password_nueva)
+    return MensajeResponse(detail=service.MENSAJE_RECUPERACION_CONFIRMADA)
 
 
 # ── /users ───────────────────────────────────────────────────────────────────
@@ -224,3 +354,18 @@ async def editar_usuario(
 ) -> Usuario:
     """Edición administrativa con jurisdicción por sede y auditoría (USR-04, SPEC-02 UC-12)."""
     return await service.editar_por_admin(db, actor, usuario_id, payload)
+
+
+@users_router.delete(
+    "/{usuario_id}/foto",
+    response_model=UsuarioDetalle,
+    summary="Quitar la foto de perfil de una cuenta",
+    responses=error_responses(401, 403, 404),
+)
+async def quitar_foto_de_usuario(
+    usuario_id: int,
+    actor: Usuario = Depends(_solo_admins),
+    db: AsyncSession = Depends(get_db),
+) -> Usuario:
+    """Con jurisdicción por sede; el ``ADMIN_LOCAL`` sólo sobre estudiantes y docentes (RN-64)."""
+    return await service.quitar_foto_por_admin(db, actor, usuario_id)

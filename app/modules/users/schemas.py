@@ -7,6 +7,7 @@
 
 from datetime import UTC, datetime
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import (
     AwareDatetime,
@@ -111,6 +112,11 @@ class UsuarioResumen(BaseModel):
     sede: SedeEnum | None = Field(..., examples=["Ushuaia"])
     estado: EstadoCuenta = Field(..., examples=["PENDIENTE_APROBACION"])
     created_at: datetime = Field(..., examples=["2026-10-07T13:45:00Z"])
+    foto_id: UUID | None = Field(
+        default=None,
+        examples=["3f2b8c1e-5d4a-4b6f-9a1e-2c7d8e9f0a1b"],
+        description="Foto de perfil vigente; se descarga por `/api/v1/files` (USR-03).",
+    )
 
 
 class UsuarioPublico(UsuarioResumen):
@@ -145,7 +151,7 @@ class TokenResponse(BaseModel):
 
     access_token: str = Field(..., examples=["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."])
     token_type: Literal["bearer"] = "bearer"
-    expires_in: int = Field(..., examples=[3600])
+    expires_in: int = Field(..., examples=[1800])
     usuario: UsuarioPublico
 
 
@@ -251,3 +257,49 @@ class UsuarioAdminUpdate(BaseModel):
         if self.password_nueva is not None:
             validar_politica_password(self.password_nueva, self.email)
         return self
+
+
+# ── SPEC-03 · Recuperación de contraseña (USR-02, Fase B1) ───────────────────
+
+MENSAJE_RECUPERACION_NEUTRO = (
+    "Si el email corresponde a una cuenta activa, te enviamos un enlace para restablecer "
+    "la contraseña. Revisá también la carpeta de spam."
+)
+
+
+class SolicitudRecuperacion(BaseModel):
+    """Pedido de enlace de recuperación (spec §5.3). La respuesta es siempre neutra (RN-44)."""
+
+    model_config = _INPUT_CONFIG
+
+    email: EmailStr = Field(..., max_length=254, examples=["lucia.perez@untdf.edu.ar"])
+
+    _norm_email = field_validator("email", mode="before")(_normalizar_email)
+
+
+class ConfirmacionRecuperacion(BaseModel):
+    """Contraseña nueva con el token del enlace (spec §5.3, RN-47).
+
+    La política de RN-03 se valida acá, antes de tocar el token: un ``422`` no lo
+    consume (AC-77). Que no sea igual al email lo controla el servicio, que conoce la
+    cuenta, también antes de consumirlo.
+    """
+
+    model_config = _INPUT_CONFIG
+
+    token: str = Field(
+        ..., min_length=20, max_length=200, examples=["c2VjcmV0by1kZS1lamVtcGxv..."]
+    )
+    password_nueva: Password
+
+    @model_validator(mode="after")
+    def _politica_password(self) -> "ConfirmacionRecuperacion":
+        validar_politica_password(self.password_nueva, None)
+        return self
+
+
+class MensajeResponse(BaseModel):
+    """Respuesta con un mensaje para mostrar."""
+
+    detail: str = Field(..., examples=[MENSAJE_RECUPERACION_NEUTRO])
+

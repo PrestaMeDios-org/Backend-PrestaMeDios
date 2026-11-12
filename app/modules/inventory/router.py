@@ -1,11 +1,14 @@
-"""Endpoints REST del módulo `inventory` (Catálogo y Existencias; SPEC-02 §4).
+"""Endpoints REST del módulo `inventory` (Catálogo y Existencias; SPEC-02 §4, SPEC-04 §5).
 
 - Todos exigen sesión (RN-24).
 - Lectura con alcance de sede: las unidades visibles son las de la jurisdicción
   del usuario (GLO-01); el catálogo (`equipamientos`, `categorias`) es global.
+- Estudiantes y docentes reciben una vista reducida, sin series ni unidades (RN-I7).
 - Escritura sólo para administradores; la sede de las unidades nuevas es
   automática para ``ADMIN_LOCAL`` (PRE-19, RN-31).
 """
+
+from datetime import date
 
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import or_, select
@@ -15,6 +18,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.deps import (
     get_current_user,
+    permiso_insuficiente,
     puede_ver_sede,
     require_roles,
     resolver_alcance_sede,
@@ -22,18 +26,31 @@ from app.core.deps import (
 )
 from app.core.enums import ROLES_ADMIN, RolUsuario
 from app.core.errors import AppError, error_responses
+from app.core.settings import ahora_lab
 from app.database import get_db
 from app.modules.config.service import obtener_parametro
+from app.modules.inventory.disponibilidad import disponibilidad_por_dia, validar_rango
 from app.modules.inventory.enums import EstadoUnidadEnum, SedeEnum
 from app.modules.inventory.models import Categoria, Equipamiento, UnidadFisica
 from app.modules.inventory.schemas import (
     CategoriaCreate,
     CategoriaResponse,
+    DiaDisponibilidad,
+    DisponibilidadResponse,
     EquipamientoCreate,
+    EquipamientoEstadoUpdate,
+    EquipamientoPublicoResponse,
     EquipamientoResponse,
+    EquipamientoUpdate,
     UnidadFisicaCreate,
     UnidadFisicaEstadoUpdate,
     UnidadFisicaResponse,
+    UnidadFisicaUpdate,
+)
+from app.modules.inventory.service import (
+    bloquear_unidad,
+    unidad_no_encontrada,
+    validar_transicion_admin,
 )
 from app.modules.users.models import Usuario
 
@@ -46,8 +63,9 @@ def _equipamiento_no_encontrado() -> AppError:
     return AppError(404, "EQUIPAMIENTO_NO_ENCONTRADO", "Equipamiento no encontrado.")
 
 
-def _unidad_no_encontrada() -> AppError:
-    return AppError(404, "UNIDAD_NO_ENCONTRADA", "Unidad física no encontrada.")
+async def _plazo_por_defecto(db: AsyncSession, es_notebook: bool) -> int:
+    clave = "prestamo.notebook.max_dias" if es_notebook else "prestamo.general.max_dias"
+    return int(await obtener_parametro(db, clave))
 
 
 async def _commit_or_409(db: AsyncSession, code: str, detail: str) -> None:
@@ -69,6 +87,11 @@ async def _commit_inventario(db: AsyncSession) -> None:
 def _unidad(datos: UnidadFisicaCreate, actor: Usuario, **extra: object) -> UnidadFisica:
     valores = datos.model_dump(exclude={"sede"})
     return UnidadFisica(**valores, sede=sede_para_alta(actor, datos.sede), **extra)
+
+
+async def _exigir_categoria(db: AsyncSession, categoria_id: str) -> None:
+    if await db.get(Categoria, categoria_id) is None:
+        raise AppError(422, "CATEGORIA_INEXISTENTE", f"La categoría '{categoria_id}' no existe.")
 
 
 # ── Categorías ───────────────────────────────────────────────────────────────
@@ -107,22 +130,43 @@ async def crear_categoria(
 # ── Equipamiento ─────────────────────────────────────────────────────────────
 
 
-def _stmt_equipamiento_en_alcance(actor: Usuario, sede: SedeEnum | None):
-    """Unidades acotadas al alcance; ítems sin unidades visibles sólo para admins (PRE-01, PRE-12)."""
+def _stmt_equipamiento_en_alcance(
+    actor: Usuario, sede: SedeEnum | None, *, incluir_inactivos: bool = False
+):
+    """Unidades acotadas al alcance; ítems sin unidades visibles sólo para admins (PRE-01, PRE-12).
+
+    Los ítems dados de baja (``activo = false``) sólo los ven los administradores
+    que lo piden (RN-I5).
+    """
     sedes = resolver_alcance_sede(actor, sede)
+    es_admin = actor.rol in ROLES_ADMIN
     visible = Equipamiento.unidades.any(UnidadFisica.sede.in_(sedes))
-    if actor.rol in ROLES_ADMIN:
+    if es_admin:
         visible = or_(visible, ~Equipamiento.unidades.any())
-    return (
+    stmt = (
         select(Equipamiento)
         .where(visible)
         .options(selectinload(Equipamiento.unidades.and_(UnidadFisica.sede.in_(sedes))))
     )
+    if not (es_admin and incluir_inactivos):
+        stmt = stmt.where(Equipamiento.activo.is_(True))
+    return stmt
+
+
+def _serializar(actor: Usuario, equipamiento: Equipamiento):
+    """Vista completa para administradores; reducida para el resto (RN-I7)."""
+    if actor.rol in ROLES_ADMIN:
+        return EquipamientoResponse.model_validate(equipamiento)
+    return EquipamientoPublicoResponse.desde_equipamiento(equipamiento)
+
+
+def _escapar_like(texto: str) -> str:
+    return texto.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 @router.get(
     "/equipamiento",
-    response_model=list[EquipamientoResponse],
+    response_model=list[EquipamientoResponse] | list[EquipamientoPublicoResponse],
     summary="Catálogo de equipamiento de la sede",
     responses=error_responses(401, 403),
 )
@@ -130,34 +174,39 @@ async def listar_equipamiento(
     sede: SedeEnum | None = Query(default=None),
     categoria: str | None = Query(default=None, max_length=50),
     q: str | None = Query(default=None, min_length=1, max_length=100),
+    incluir_inactivos: bool = Query(default=False),
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> list[Equipamiento]:
+):
     """Lista el catálogo con el stock calculado sobre las unidades de la jurisdicción.
 
     - ``sede``: sólo el Superadministrador puede elegirla; el resto opera en la suya.
     - ``categoria``: id de categoría (coincidencia exacta).
-    - ``q``: búsqueda por nombre, código o marca.
+    - ``q``: búsqueda literal por nombre, código o marca.
+    - ``incluir_inactivos``: sólo administradores; el resto lo ignora.
+    - Estudiantes y docentes reciben la vista reducida (sin unidades ni series).
     """
-    stmt = _stmt_equipamiento_en_alcance(actor, sede).order_by(Equipamiento.nombre)
+    stmt = _stmt_equipamiento_en_alcance(
+        actor, sede, incluir_inactivos=incluir_inactivos
+    ).order_by(Equipamiento.nombre)
     if categoria is not None:
         stmt = stmt.where(Equipamiento.categoria_id == categoria)
     if q is not None:
-        patron = f"%{q}%"
+        patron = f"%{_escapar_like(q)}%"
         stmt = stmt.where(
             or_(
-                Equipamiento.nombre.ilike(patron),
-                Equipamiento.codigo.ilike(patron),
-                Equipamiento.marca.ilike(patron),
+                Equipamiento.nombre.ilike(patron, escape="\\"),
+                Equipamiento.codigo.ilike(patron, escape="\\"),
+                Equipamiento.marca.ilike(patron, escape="\\"),
             )
         )
     result = await db.scalars(stmt)
-    return list(result.all())
+    return [_serializar(actor, e) for e in result.all()]
 
 
 @router.get(
     "/equipamiento/{equipamiento_id}",
-    response_model=EquipamientoResponse,
+    response_model=EquipamientoResponse | EquipamientoPublicoResponse,
     summary="Detalle de un ítem del catálogo",
     responses=error_responses(401, 403, 404),
 )
@@ -166,12 +215,48 @@ async def obtener_equipamiento(
     sede: SedeEnum | None = Query(default=None),
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-) -> Equipamiento:
-    stmt = _stmt_equipamiento_en_alcance(actor, sede).where(Equipamiento.id == equipamiento_id)
+):
+    stmt = _stmt_equipamiento_en_alcance(actor, sede, incluir_inactivos=True).where(
+        Equipamiento.id == equipamiento_id
+    )
     equipamiento = await db.scalar(stmt)
-    if equipamiento is None:
+    if equipamiento is None or (not equipamiento.activo and actor.rol not in ROLES_ADMIN):
         raise _equipamiento_no_encontrado()
-    return equipamiento
+    return _serializar(actor, equipamiento)
+
+
+@router.get(
+    "/equipamiento/{equipamiento_id}/disponibilidad",
+    response_model=DisponibilidadResponse,
+    summary="Disponibilidad por día de un ítem (mini-calendario)",
+    responses=error_responses(401, 403, 404, 422),
+)
+async def obtener_disponibilidad(
+    equipamiento_id: int,
+    desde: date = Query(..., examples=["2026-11-09"]),
+    hasta: date = Query(..., examples=["2026-11-30"]),
+    sede: SedeEnum | None = Query(default=None),
+    actor: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> DisponibilidadResponse:
+    # Unidades libres por dia, sin identidad de solicitantes (PRE-01, RN-I14, RN-I15).
+    sede_calculo = sede_para_alta(actor, sede)
+    validar_rango(desde, hasta, ahora_lab().date())
+    stmt = _stmt_equipamiento_en_alcance(actor, sede_calculo, incluir_inactivos=True).where(
+        Equipamiento.id == equipamiento_id
+    )
+    equipamiento = await db.scalar(stmt)
+    if equipamiento is None or (not equipamiento.activo and actor.rol not in ROLES_ADMIN):
+        raise _equipamiento_no_encontrado()
+    asignables, dias = await disponibilidad_por_dia(db, equipamiento_id, sede_calculo, desde, hasta)
+    return DisponibilidadResponse(
+        equipamiento_id=equipamiento_id,
+        sede=sede_calculo,
+        desde=desde,
+        hasta=hasta,
+        unidades_asignables=asignables,
+        dias=[DiaDisponibilidad(fecha=f, unidades_libres=n, disponible=n > 0) for f, n in dias],
+    )
 
 
 @router.post(
@@ -186,21 +271,103 @@ async def crear_equipamiento(
     actor: Usuario = Depends(_solo_admins),
     db: AsyncSession = Depends(get_db),
 ) -> Equipamiento:
-    """PRE-19 en cada unidad; plazo por defecto desde ``prestamo.general.max_dias`` (GLO-03)."""
-    if await db.get(Categoria, payload.categoria_id) is None:
-        raise AppError(
-            422, "CATEGORIA_INEXISTENTE", f"La categoría '{payload.categoria_id}' no existe."
-        )
+    """PRE-19 en cada unidad; plazo por defecto desde ``prestamo.*.max_dias`` (GLO-03, D-05)."""
+    await _exigir_categoria(db, payload.categoria_id)
     datos = payload.model_dump(exclude={"unidades", "max_dias_prestamo"})
     max_dias = payload.max_dias_prestamo
     if max_dias is None:
-        max_dias = int(await obtener_parametro(db, "prestamo.general.max_dias"))
+        max_dias = await _plazo_por_defecto(db, payload.es_notebook)
 
     equipamiento = Equipamiento(**datos, max_dias_prestamo=max_dias)
     equipamiento.unidades = [_unidad(u, actor) for u in payload.unidades]
     db.add(equipamiento)
     await _commit_inventario(db)
     await db.refresh(equipamiento, attribute_names=["unidades"])
+    return equipamiento
+
+
+async def _equipamiento_editable(db: AsyncSession, actor: Usuario, equipamiento_id: int) -> Equipamiento:
+    """Ítem dentro del alcance del admin (incluye inactivos); si no, ``404`` (D-06)."""
+    stmt = _stmt_equipamiento_en_alcance(actor, None, incluir_inactivos=True).where(
+        Equipamiento.id == equipamiento_id
+    )
+    equipamiento = await db.scalar(stmt)
+    if equipamiento is None:
+        raise _equipamiento_no_encontrado()
+    return equipamiento
+
+
+@router.patch(
+    "/equipamiento/{equipamiento_id}",
+    response_model=EquipamientoResponse,
+    summary="Editar un ítem del catálogo",
+    responses=error_responses(401, 403, 404, 409, 422),
+)
+async def editar_equipamiento(
+    equipamiento_id: int,
+    payload: EquipamientoUpdate,
+    actor: Usuario = Depends(_solo_admins),
+    db: AsyncSession = Depends(get_db),
+) -> Equipamiento:
+    """Edición parcial; ``codigo`` es inmutable (PRE-12)."""
+    equipamiento = await _equipamiento_editable(db, actor, equipamiento_id)
+    cambios = payload.model_dump(exclude_unset=True)
+    if "categoria_id" in cambios:
+        await _exigir_categoria(db, cambios["categoria_id"])
+    if (
+        "es_notebook" in cambios
+        and cambios["es_notebook"] != equipamiento.es_notebook
+        and "max_dias_prestamo" not in cambios
+    ):
+        cambios["max_dias_prestamo"] = await _plazo_por_defecto(db, cambios["es_notebook"])
+    for campo, valor in cambios.items():
+        setattr(equipamiento, campo, valor)
+    await _commit_inventario(db)
+    return equipamiento
+
+
+@router.patch(
+    "/equipamiento/{equipamiento_id}/estado",
+    response_model=EquipamientoResponse,
+    summary="Baja o reactivación lógica de un ítem",
+    responses=error_responses(401, 403, 404, 409),
+)
+async def cambiar_estado_equipamiento(
+    equipamiento_id: int,
+    payload: EquipamientoEstadoUpdate,
+    actor: Usuario = Depends(_solo_admins),
+    db: AsyncSession = Depends(get_db),
+) -> Equipamiento:
+    """Baja lógica (RN-I5). No se borra nada; no admite unidades prestadas."""
+    equipamiento = await _equipamiento_editable(db, actor, equipamiento_id)
+    if not payload.activo and equipamiento.activo:
+        sedes = set(
+            (
+                await db.scalars(
+                    select(UnidadFisica.sede)
+                    .where(UnidadFisica.equipamiento_id == equipamiento_id)
+                    .distinct()
+                )
+            ).all()
+        )
+        if actor.rol != RolUsuario.SUPERADMIN and len(sedes) > 1:
+            raise permiso_insuficiente()
+        prestada = await db.scalar(
+            select(UnidadFisica.id)
+            .where(
+                UnidadFisica.equipamiento_id == equipamiento_id,
+                UnidadFisica.estado == EstadoUnidadEnum.PRESTADO,
+            )
+            .limit(1)
+        )
+        if prestada is not None:
+            raise AppError(
+                409,
+                "EQUIPAMIENTO_CON_PRESTAMOS",
+                "El equipamiento tiene unidades prestadas; esperá a que se devuelvan.",
+            )
+    equipamiento.activo = payload.activo
+    await db.commit()
     return equipamiento
 
 
@@ -256,10 +423,32 @@ async def listar_unidades(
 
 
 @router.patch(
+    "/unidades/{unidad_id}",
+    response_model=UnidadFisicaResponse,
+    summary="Editar serie, código de inventario o locker de una unidad",
+    responses=error_responses(401, 403, 404, 409, 422),
+)
+async def editar_unidad(
+    unidad_id: int,
+    payload: UnidadFisicaUpdate,
+    actor: Usuario = Depends(_solo_admins),
+    db: AsyncSession = Depends(get_db),
+) -> UnidadFisica:
+    """La sede no se modifica (RN-I1, PRE-12)."""
+    unidad = await db.get(UnidadFisica, unidad_id)
+    if unidad is None or not puede_ver_sede(actor, unidad.sede):
+        raise unidad_no_encontrada()
+    for campo, valor in payload.model_dump(exclude_unset=True).items():
+        setattr(unidad, campo, valor)
+    await _commit_inventario(db)
+    return unidad
+
+
+@router.patch(
     "/unidades/{unidad_id}/estado",
     response_model=UnidadFisicaResponse,
     summary="Cambiar el estado de una unidad (mantenimiento, baja, disponible)",
-    responses=error_responses(401, 403, 404),
+    responses=error_responses(401, 403, 404, 409, 422),
 )
 async def cambiar_estado_unidad(
     unidad_id: int,
@@ -269,12 +458,23 @@ async def cambiar_estado_unidad(
 ) -> UnidadFisica:
     """Cambia el estado de una unidad (PRE-14).
 
-    El botón "Fuera de servicio" del panel envía ``estado="mantenimiento"``;
-    para rehabilitarla se envía ``estado="disponible"``.
+    - ``mantenimiento`` = "En Mantenimiento" (temporal); ``baja`` = "Fuera de servicio"
+      (definitivo); ``disponible`` rehabilita una unidad en mantenimiento (D-03, D-09).
+    - ``prestado`` no se acepta: lo gestiona `loans` (D-02).
+    - Las unidades prestadas y las dadas de baja no admiten cambios manuales.
     """
-    unidad = await db.get(UnidadFisica, unidad_id)
+    unidad = await bloquear_unidad(db, unidad_id)
     if unidad is None or not puede_ver_sede(actor, unidad.sede):
-        raise _unidad_no_encontrada()
+        raise unidad_no_encontrada()
+    if payload.estado is EstadoUnidadEnum.PRESTADO:
+        raise AppError(
+            422,
+            "ESTADO_NO_PERMITIDO",
+            "El estado 'prestado' lo gestiona el módulo de préstamos.",
+        )
+    if payload.estado is unidad.estado:
+        return unidad
+    validar_transicion_admin(unidad.estado, payload.estado)
     unidad.estado = payload.estado
     await db.commit()
     return unidad

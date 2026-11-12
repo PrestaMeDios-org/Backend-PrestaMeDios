@@ -10,9 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.errors import AppError, app_error_handler
 from app.core.settings import get_settings
 from app.modules.config.router import router as config_router
+from app.modules.files.router import router as files_router
 from app.modules.inventory.router import router as inventory_router
-from app.modules.spaces.router import router as spaces_router
 from app.modules.loans.router import router as loans_router
+from app.modules.notifications.router import router as notifications_router
+from app.modules.spaces.router import router as spaces_router
 from app.modules.users.router import auth_router, users_router
 
 # Falla al arrancar si falta configuración obligatoria (p. ej. JWT_SECRET_KEY).
@@ -22,7 +24,8 @@ app = FastAPI(
     title="PrestaMeDios API",
     description=(
         "API del Laboratorio de Medios Audiovisuales (ICSE — UNTDF): identidad y permisos, "
-        "catálogo e inventario, reservas de espacios y configuración global."
+        "catálogo e inventario, préstamos y solicitudes de equipamiento,"
+        "reservas de espacios y configuración global."
     ),
     version="0.2.0",
 )
@@ -56,6 +59,12 @@ app.include_router(
 )
 
 app.include_router(
+    files_router,
+    prefix="/api/v1/files",
+    tags=["Archivos"],
+)
+
+app.include_router(
     inventory_router,
     prefix="/api/v1/inventory",
     tags=["Catálogo e Inventario"],
@@ -72,6 +81,12 @@ app.include_router(
     loans_router,
     prefix="/api/v1/loans",
     tags=["Préstamos y Solicitudes"],
+)
+
+app.include_router(
+    notifications_router,
+    prefix="/api/v1/notifications",
+    tags=["Comunicaciones y notificaciones"],
 )
 
 

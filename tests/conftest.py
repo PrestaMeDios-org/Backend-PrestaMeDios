@@ -10,13 +10,15 @@
 import itertools
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timedelta, timezone 
 
 import pytest
 from dotenv import load_dotenv
 
 load_dotenv()
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-no-usar-en-produccion-0123456789")
+# Los tests nunca mandan correos reales, aunque el `.env` diga `smtp` (SPEC-03 RN-76).
+os.environ["EMAIL_BACKEND"] = "memoria"
 
 import httpx  # noqa: E402
 from sqlalchemy import text  # noqa: E402
@@ -29,6 +31,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import NullPool  # noqa: E402
 
+from app.core.email import CorreoEnviado, bandeja_memoria, vaciar_bandeja_memoria  # noqa: E402
 from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum  # noqa: E402
 from app.core.security import crear_access_token, hash_password  # noqa: E402
 from app.database import Base, get_db  # noqa: E402
@@ -36,18 +39,41 @@ from app.main import app  # noqa: E402
 from app.modules.config import models as _config_models  # noqa: E402, F401
 from app.modules.config.models import ParametroGlobal  # noqa: E402
 from app.modules.config.seed import PARAMETROS_SEMILLA  # noqa: E402
+from app.modules.files import models as _files_models  # noqa: E402, F401
 from app.modules.inventory import models as _inventory_models  # noqa: E402, F401
+from app.modules.loans import models as _loans_models  # noqa: E402, F401
+from app.modules.notifications import models as _notifications_models  # noqa: E402, F401
 from app.modules.spaces import models as _spaces_models  # noqa: E402, F401
 from app.modules.users.models import Usuario  # noqa: E402
+
+from app.modules.inventory.enums import EstadoUnidadEnum  # noqa: E402
+from app.modules.inventory.models import Categoria, Equipamiento, UnidadFisica  # noqa: E402
+from app.modules.loans.enums import EstadoDetalleEnum, EstadoOrdenEnum  # noqa: E402
+from app.modules.loans.models import DetallePrestamo, OrdenPedido  # noqa: E402
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 PASSWORD = "Camara2026!"
 
 _TABLAS = (
+    "notificaciones, comunicados, "  # SPEC-06 (conformidad del Perfil 1, T-01)
+    "intentos_recuperacion, "  # SPEC-03 B1: sin FK, el CASCADE de `usuarios` no la vacía
     "parametros_globales_historial, parametros_globales, usuarios_historial_estado, "
-    "reservas_espacios, bloqueos_espacios, espacios, unidades_fisicas, equipamientos, "
-    "categorias, usuarios"
+    "reservas_espacios, bloqueos_espacios, espacios, ordenes_historial_estado, "
+    "detalles_prestamo, ordenes_pedido, "
+    "unidades_fisicas, equipamientos, categorias, usuarios"
 )
+
+
+@pytest.fixture(autouse=True)
+def _bandeja_vacia() -> None:
+    """Cada test empieza con la bandeja del backend ``memoria`` vacía (RN-76)."""
+    vaciar_bandeja_memoria()
+
+
+@pytest.fixture
+def correos() -> list[CorreoEnviado]:
+    """Correos enviados durante el test (backend ``memoria``), en orden."""
+    return bandeja_memoria()
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -262,3 +288,96 @@ def set_parametro(db: AsyncSession):
         await db.commit()
 
     return _set
+
+"""Fábricas de `loans` para los tests de integración (plan-05 §3).
+ 
+Crean datos de `inventory` y líneas de préstamo directamente en la base. Los tests
+de `loans` pueden importar los modelos de otros módulos: la regla de aislamiento
+(Constitución P3.3) rige para el código de la aplicación, no para los tests.
+"""
+ 
+TZ = timezone(timedelta(hours=-3))  # zona del laboratorio (Ushuaia)
+_serie = itertools.count(1)
+ 
+ 
+@pytest.fixture
+def crear_equipamiento(db):
+    """Fábrica: un ítem del catálogo con una unidad por cada estado indicado."""
+ 
+    async def _crear(
+        *,
+        nombre: str = "Cámara de prueba",
+        sede: SedeEnum = SedeEnum.USHUAIA,
+        estados: tuple[EstadoUnidadEnum, ...] = (EstadoUnidadEnum.DISPONIBLE,),
+        es_notebook: bool = False,
+        alta_gama: bool = False,
+        activo: bool = True,
+        max_dias_prestamo: int = 4,
+    ) -> Equipamiento:
+        if await db.get(Categoria, "test") is None:
+            db.add(Categoria(id="test", nombre="Categoría de prueba"))
+        n = next(_serie)
+        equipamiento = Equipamiento(
+            codigo=f"EQ-{n:04d}",
+            nombre=nombre,
+            marca="Marca",
+            modelo=f"M{n}",
+            categoria_id="test",
+            max_dias_prestamo=max_dias_prestamo,
+            alta_gama=alta_gama,
+            es_notebook=es_notebook,
+            activo=activo,
+        )
+        equipamiento.unidades = [
+            UnidadFisica(
+                numero_serie=f"SN-{n:04d}-{i}",
+                codigo_inventario=f"INV-{n:04d}-{i}",
+                sede=sede,
+                estado=estado,
+            )
+            for i, estado in enumerate(estados, start=1)
+        ]
+        db.add(equipamiento)
+        await db.commit()
+        return equipamiento
+ 
+    return _crear
+ 
+ 
+@pytest.fixture
+def crear_linea(db, crear_usuario):
+    """Fábrica: una orden con una línea sobre ``unidad`` en el estado indicado."""
+ 
+    async def _crear(
+        equipamiento: Equipamiento,
+        unidad: UnidadFisica,
+        estado: EstadoDetalleEnum,
+        *,
+        dia: int = 1,
+        retiro: datetime | None = None,
+        solicitante=None,
+    ) -> OrdenPedido:
+        """``retiro`` reemplaza a ``dia`` cuando el test necesita fechas relativas a hoy."""
+        solicitante = solicitante or await crear_usuario(RolUsuario.ESTUDIANTE)
+        retiro = retiro or datetime(2026, 12, dia, 10, tzinfo=TZ)
+        devolucion = retiro + timedelta(days=2, hours=5)
+        orden = OrdenPedido(
+            solicitante_id=solicitante._cache_auth["id"],  # type: ignore[attr-defined]
+            sede=unidad.sede,
+            estado=EstadoOrdenEnum.APROBADA,
+        )
+        orden.detalles = [
+            DetallePrestamo(
+                equipamiento_id=equipamiento.id,
+                unidad_fisica_id=unidad.id,
+                estado=estado,
+                retiro_pactado=retiro,
+                devolucion_pactada=devolucion,
+                fin_ocupacion=devolucion,
+            )
+        ]
+        db.add(orden)
+        await db.commit()
+        return orden
+ 
+    return _crear

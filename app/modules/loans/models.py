@@ -1,17 +1,22 @@
 """Modelos ORM del módulo `loans` (SQLAlchemy 2.0).
 
-Tablas: ``ordenes_pedido`` (solicitud unificada) y ``detalles_prestamo``
-(una línea por unidad pedida).
+Tablas: ``ordenes_pedido`` (solicitud unificada), ``detalles_prestamo``
+(una línea por unidad pedida) y ``ordenes_historial_estado`` (traza de las
+transiciones de la orden).
 
 """
 
+import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     Computed,
     DateTime,
     ForeignKey,
+    Identity,
+    Index,
     String,
     false,
     func,
@@ -20,6 +25,7 @@ from sqlalchemy import (
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from sqlalchemy.dialects.postgresql import TSTZRANGE, ExcludeConstraint, Range
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import SedeEnum, enum_values
@@ -31,6 +37,7 @@ from app.modules.loans.enums import EstadoDetalleEnum, EstadoOrdenEnum
 SEDE_ENUM_COMPARTIDO = PGEnum(
     SedeEnum, values_callable=enum_values, name="sede_enum", create_type=False
 )
+ESTADO_ORDEN_ENUM = SAEnum(EstadoOrdenEnum, values_callable=enum_values, name="estado_orden_enum")
 
 
 class OrdenPedido(Base):
@@ -49,7 +56,7 @@ class OrdenPedido(Base):
     # Sin FK por ahora: todavía no existe el módulo de asignaturas.
     asignatura_id: Mapped[int | None]
     estado: Mapped[EstadoOrdenEnum] = mapped_column(
-        SAEnum(EstadoOrdenEnum, values_callable=enum_values, name="estado_orden_enum"),
+        ESTADO_ORDEN_ENUM,
         default=EstadoOrdenEnum.PENDIENTE,
         server_default=text("'pendiente'"),
         index=True,
@@ -60,6 +67,16 @@ class OrdenPedido(Base):
     observacion_docente: Mapped[str | None] = mapped_column(String(500))
     motivo_resolucion: Mapped[str | None] = mapped_column(String(500))
     es_renovado: Mapped[bool] = mapped_column(default=False, server_default=false())
+    # Quién y cuándo aprobó, rechazó o canceló la orden (0011, USR-08).
+    resuelto_por_id: Mapped[int | None] = mapped_column(
+        ForeignKey("usuarios.id", ondelete="SET NULL")
+    )
+    resuelto_en: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # PDF de aval de `files` para órdenes con alta gama (0016, RN-L09). `files` sólo
+    # marca el archivo como vinculado; la orden guarda cuál es el suyo.
+    aval_archivo_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("archivos.id", ondelete="RESTRICT")
+    )
 
     detalles: Mapped[list["DetallePrestamo"]] = relationship(
         back_populates="orden",
@@ -127,4 +144,26 @@ class DetallePrestamo(Base):
 
     orden: Mapped["OrdenPedido"] = relationship(
         back_populates="detalles", lazy="raise_on_sql"
+    )
+
+
+class OrdenHistorialEstado(Base):
+    """Traza inmutable de las transiciones de una orden (P7.3, D-L10).
+
+    Igual que ``usuarios_historial_estado``: una fila por cambio, nunca se edita.
+    """
+
+    __tablename__ = "ordenes_historial_estado"
+    __table_args__ = (
+        Index("ix_ordenes_historial_estado_orden_id_created_at", "orden_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    orden_id: Mapped[int] = mapped_column(ForeignKey("ordenes_pedido.id", ondelete="CASCADE"))
+    estado_anterior: Mapped[EstadoOrdenEnum | None] = mapped_column(ESTADO_ORDEN_ENUM)
+    estado_nuevo: Mapped[EstadoOrdenEnum] = mapped_column(ESTADO_ORDEN_ENUM)
+    motivo: Mapped[str | None] = mapped_column(String(500))
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("usuarios.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )

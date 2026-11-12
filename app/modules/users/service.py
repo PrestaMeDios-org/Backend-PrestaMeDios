@@ -4,16 +4,25 @@ Los servicios no conocen HTTP salvo ``AppError``; los routers sólo validan
 contrato y permisos y delegan aquí.
 """
 
+import hashlib
+import hmac
+import logging
+import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import Select, func, or_, select
+from fastapi import UploadFile
+from fastapi.exceptions import RequestValidationError
+from sqlalchemy import Integer, Select, any_, bindparam, delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import permiso_insuficiente, resolver_alcance_sede
+from app.core.deps import SesionActual, permiso_insuficiente, resolver_alcance_sede
 from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum
+from app.core.email import ErrorEnvioCorreo, TipoCorreo, enviar_correo
 from app.core.errors import AppError
 from app.core.security import (
     crear_access_token,
@@ -21,8 +30,18 @@ from app.core.security import (
     verify_dummy,
     verify_password,
 )
-from app.modules.users.models import Usuario, UsuarioHistorialCambios, UsuarioHistorialEstado
+from app.modules.files import service as files
+from app.modules.files.enums import PropositoArchivo
+from app.core.settings import get_settings
+from app.modules.users.models import (
+    IntentoRecuperacion,
+    TokenRecuperacion,
+    Usuario,
+    UsuarioHistorialCambios,
+    UsuarioHistorialEstado,
+)
 from app.modules.users.schemas import (
+    validar_politica_password,
     CambioEstadoRequest,
     CambioPasswordRequest,
     PerfilUpdate,
@@ -32,6 +51,8 @@ from app.modules.users.schemas import (
 )
 
 E = EstadoCuenta
+
+logger = logging.getLogger(__name__)
 
 # (desde, hacia) → ¿incrementa token_version? (SPEC-01 §3.2). Lo no listado es inválido.
 TRANSICIONES: dict[tuple[EstadoCuenta, EstadoCuenta], bool] = {
@@ -470,6 +491,8 @@ async def actualizar_perfil(db: AsyncSession, usuario: Usuario, datos: PerfilUpd
         _aplicar(usuario, "email", datos.email, cambios)
     if "telefono" in datos.model_fields_set:
         _aplicar(usuario, "telefono", datos.telefono, cambios)
+    if "email" in cambios:  # SPEC-03 RN-53: el enlace se mandó a la dirección anterior
+        await _invalidar_tokens_recuperacion(db, usuario.id)
 
     _registrar_cambios(db, usuario, cambios, actor_id=usuario.id)
     await _persistir(db, commit=True)
@@ -577,8 +600,387 @@ async def editar_por_admin(
         revoca = True
     if revoca:
         objetivo.token_version += 1  # RN-08
+    if "email" in cambios:  # SPEC-03 RN-53
+        await _invalidar_tokens_recuperacion(db, objetivo.id)
 
     _registrar_cambios(db, objetivo, cambios, actor_id=actor.id)
     await _persistir(db, commit=True)
     await db.refresh(objetivo)
     return objetivo
+
+
+# ── SPEC-03 · Foto de perfil (USR-03, Fase B2) ───────────────────────────────
+
+
+def _str_o_none(valor: object) -> str | None:
+    return None if valor is None else str(valor)
+
+
+async def _cambiar_foto(
+    db: AsyncSession, objetivo: Usuario, nueva_id, *, actor_id: int
+) -> Usuario:
+    """RN-59: apunta ``foto_id``, borra la anterior y deja traza, todo en una transacción.
+
+    ``objetivo`` ya está bloqueado (``FOR UPDATE``, EC-41).
+    """
+    anterior = objetivo.foto_id
+    if anterior == nueva_id:  # quitar sin foto: nada que cambiar
+        await db.commit()  # libera el lock sin expirar los atributos
+        return objetivo
+    objetivo.foto_id = nueva_id
+    await db.flush()
+    if anterior is not None:
+        await files.borrar_archivo(db, anterior)
+    _registrar_cambios(
+        db,
+        objetivo,
+        {"foto_id": [_str_o_none(anterior), _str_o_none(nueva_id)]},
+        actor_id=actor_id,
+    )
+    await db.commit()
+    await db.refresh(objetivo)
+    return objetivo
+
+
+async def reemplazar_foto(
+    db: AsyncSession, usuario: Usuario, archivo: UploadFile, *, content_length: int | None
+) -> Usuario:
+    """``PUT /auth/me/foto``: sube, vincula y reemplaza en un solo paso (USR-03, D-11).
+
+    La imagen se procesa antes de bloquear la fila, para no retener el lock.
+    """
+    jpeg, nombre = await files.preparar_foto(archivo, content_length=content_length)
+    objetivo = await _bloquear(db, usuario.id)
+    nueva = await files.guardar_archivo(
+        db,
+        propietario=objetivo,
+        proposito=PropositoArchivo.FOTO_PERFIL,
+        datos=jpeg,
+        tipo_mime=files.JPEG,
+        nombre=nombre,
+        vinculado=True,
+    )
+    return await _cambiar_foto(db, objetivo, nueva.id, actor_id=usuario.id)
+
+
+async def quitar_foto(db: AsyncSession, usuario: Usuario) -> Usuario:
+    """``DELETE /auth/me/foto``. Sin foto, no cambia nada (RN-59)."""
+    objetivo = await _bloquear(db, usuario.id)
+    return await _cambiar_foto(db, objetivo, None, actor_id=usuario.id)
+
+
+async def quitar_foto_por_admin(db: AsyncSession, actor: Usuario, usuario_id: int) -> Usuario:
+    """``DELETE /users/{id}/foto`` con las reglas de UC-12 de SPEC-02 (RN-64).
+
+    Fuera de la jurisdicción responde ``404``; el ``ADMIN_LOCAL`` sobre una cuenta que
+    no es de estudiante ni de docente, ``403``.
+    """
+    objetivo = await db.scalar(
+        select(Usuario)
+        .where(Usuario.id == usuario_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if objetivo is None or not _en_jurisdiccion(actor, objetivo):
+        await db.rollback()
+        raise usuario_no_encontrado()
+    if actor.rol == RolUsuario.ADMIN_LOCAL and objetivo.rol not in ROLES_GESTIONABLES_POR_ADMIN_LOCAL:
+        await db.rollback()
+        raise permiso_insuficiente()
+    return await _cambiar_foto(db, objetivo, None, actor_id=actor.id)
+
+
+# ── SPEC-03 · Recuperación de contraseña (USR-02, Fase B1) ───────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class CorreoRecuperacion:
+    """Lo necesario para mandar el enlace después del commit (RN-72). Lleva el token: no
+    se registra en logs ni se devuelve en respuestas (NFR-19)."""
+
+    usuario_id: int
+    destinatario: str
+    nombre: str
+    enlace: str
+    vigencia_minutos: int
+
+
+def _hash_token(token: str) -> str:
+    """RN-46: en la base sólo queda el SHA-256 del token."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _hash_email(email: str) -> str:
+    """RN-49: HMAC del email normalizado. Con un hash simple, un diccionario de emails
+    conocidos lo revertiría."""
+    clave = get_settings().jwt_secret_key.encode()
+    return hmac.new(clave, email.encode(), hashlib.sha256).hexdigest()
+
+
+def _demasiados_intentos() -> AppError:
+    return AppError(
+        429, "DEMASIADOS_INTENTOS", "Hiciste demasiados pedidos. Probá de nuevo más tarde."
+    )
+
+
+async def _invalidar_tokens_recuperacion(db: AsyncSession, usuario_id: int) -> None:
+    """RN-48, RN-53: marca como usados los tokens pendientes de la cuenta. Sin ``commit``."""
+    await db.execute(
+        update(TokenRecuperacion)
+        .where(TokenRecuperacion.usuario_id == usuario_id, TokenRecuperacion.usado_en.is_(None))
+        .values(usado_en=func.now())
+    )
+
+
+async def solicitar_recuperacion(
+    db: AsyncSession, email: str, ip: str
+) -> CorreoRecuperacion | None:
+    """Pedido de enlace de recuperación (USR-02, RN-44…RN-49).
+
+    Devuelve los datos del correo sólo si la cuenta existe y está ``ACTIVO`` (RN-45); si
+    no, ``None``. El router responde lo mismo en ambos casos (RN-44). ``429`` si se pasa
+    el límite por email o por IP en la última hora, exista o no la cuenta (RN-49).
+    """
+    settings = get_settings()
+    await db.execute(
+        delete(IntentoRecuperacion).where(
+            IntentoRecuperacion.created_at < func.now() - timedelta(hours=24)
+        )
+    )
+    email_hash = _hash_email(email)
+    hace_una_hora = func.now() - timedelta(hours=1)
+    por_email = await db.scalar(
+        select(func.count())
+        .select_from(IntentoRecuperacion)
+        .where(
+            IntentoRecuperacion.email_hash == email_hash,
+            IntentoRecuperacion.created_at >= hace_una_hora,
+        )
+    )
+    por_ip = await db.scalar(
+        select(func.count())
+        .select_from(IntentoRecuperacion)
+        .where(IntentoRecuperacion.ip == ip, IntentoRecuperacion.created_at >= hace_una_hora)
+    )
+    if (por_email or 0) >= settings.recuperacion_max_por_email_hora or (
+        por_ip or 0
+    ) >= settings.recuperacion_max_por_ip_hora:
+        await db.commit()  # conserva la limpieza de los intentos viejos
+        raise _demasiados_intentos()
+    db.add(IntentoRecuperacion(email_hash=email_hash, ip=ip))
+
+    usuario = await _buscar_por(db, email=email)
+    pendiente: CorreoRecuperacion | None = None
+    if usuario is not None and usuario.estado == E.ACTIVO:
+        await _invalidar_tokens_recuperacion(db, usuario.id)  # RN-48
+        token = secrets.token_urlsafe(32)  # 256 bits (RN-46)
+        vigencia = settings.recuperacion_vigencia_minutos
+        db.add(
+            TokenRecuperacion(
+                usuario_id=usuario.id,
+                token_hash=_hash_token(token),
+                expira_en=datetime.now(UTC) + timedelta(minutes=vigencia),
+            )
+        )
+        pendiente = CorreoRecuperacion(
+            usuario_id=usuario.id,
+            destinatario=usuario.email,
+            nombre=usuario.nombre,
+            enlace=f"{settings.frontend_url.rstrip('/')}/#/restablecer?token={token}",  # RN-47
+            vigencia_minutos=vigencia,
+        )
+    await db.commit()
+    return pendiente
+
+
+async def enviar_correo_recuperacion(pendiente: CorreoRecuperacion) -> None:
+    """Manda el enlace (se agenda con ``BackgroundTasks``, RN-72). Un fallo del transporte
+    se registra sin el enlace y no cambia la respuesta (RN-73, NFR-19)."""
+    try:
+        await enviar_correo(
+            TipoCorreo.RECUPERACION_PASSWORD,
+            pendiente.destinatario,
+            {
+                "nombre": pendiente.nombre,
+                "enlace": pendiente.enlace,
+                "vigencia_minutos": str(pendiente.vigencia_minutos),
+            },
+            usuario_id=pendiente.usuario_id,
+        )
+    except ErrorEnvioCorreo:
+        logger.warning(
+            "No se pudo enviar el correo de recuperación: usuario_id=%s", pendiente.usuario_id
+        )
+
+
+MENSAJE_RECUPERACION_CONFIRMADA = "Tu contraseña se actualizó. Iniciá sesión con la nueva."
+
+
+def _token_recuperacion_invalido() -> AppError:
+    return AppError(
+        422, "TOKEN_RECUPERACION_INVALIDO", "El enlace no es válido o ya venció. Pedí uno nuevo."
+    )
+
+
+def _token_vigente(token_hash: str):
+    return (
+        TokenRecuperacion.token_hash == token_hash,
+        TokenRecuperacion.usado_en.is_(None),
+        TokenRecuperacion.expira_en > func.now(),
+    )
+
+
+async def confirmar_recuperacion(db: AsyncSession, token: str, password_nueva: str) -> None:
+    """Restablece la contraseña con el token del enlace (USR-02, RN-50…RN-52).
+
+    - Un token inexistente, vencido, usado o de una cuenta que ya no está ``ACTIVO``
+      responde lo mismo: ``422 TOKEN_RECUPERACION_INVALIDO`` (RN-51).
+    - La contraseña igual al email se rechaza **antes** de consumir el token (AC-77).
+    - El consumo es un ``UPDATE ... RETURNING`` atómico: de dos confirmaciones
+      simultáneas sólo una prospera (RN-50).
+    - Nuevo hash, ``token_version + 1`` (cierra todas las sesiones), sin cambio
+      obligatorio, demás tokens invalidados y traza sin la contraseña (RN-48, RN-52).
+      No inicia sesión (D-09).
+    """
+    token_hash = _hash_token(token)
+    email = await db.scalar(
+        select(Usuario.email)
+        .join(TokenRecuperacion, TokenRecuperacion.usuario_id == Usuario.id)
+        .where(*_token_vigente(token_hash))
+    )
+    if email is None:
+        raise _token_recuperacion_invalido()
+    try:
+        validar_politica_password(password_nueva, email)  # RN-03 con el email de la cuenta
+    except ValueError as exc:
+        await db.rollback()
+        raise RequestValidationError(
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("body", "password_nueva"),
+                    "msg": str(exc),
+                    "input": None,
+                }
+            ]
+        ) from None
+
+    usuario_id = await db.scalar(
+        update(TokenRecuperacion)
+        .where(*_token_vigente(token_hash))
+        .values(usado_en=func.now())
+        .returning(TokenRecuperacion.usuario_id)
+    )
+    if usuario_id is None:  # otra confirmación lo consumió primero (RN-50)
+        await db.rollback()
+        raise _token_recuperacion_invalido()
+    usuario = await _bloquear(db, usuario_id)
+    if usuario.estado != E.ACTIVO:  # RN-51, EC-38
+        await db.rollback()
+        raise _token_recuperacion_invalido()
+
+    usuario.password_hash = hash_password(password_nueva)
+    usuario.token_version += 1  # RN-08: cierra todas las sesiones (EC-37)
+    usuario.debe_cambiar_password = False  # EC-39: la eligió el propio usuario
+    await _invalidar_tokens_recuperacion(db, usuario_id)  # RN-48
+    _registrar_cambios(db, usuario, {"password": [_OCULTO, _OCULTO]}, actor_id=usuario_id)
+    await db.commit()
+
+
+# ── SPEC-03 · Renovación de sesión (D-06 de SPEC-01, Fase B3) ────────────────
+
+
+def _sesion_maxima() -> AppError:
+    return AppError(
+        401,
+        "TOKEN_SESION_MAXIMA",
+        "Pasó el tiempo máximo de la sesión. Iniciá sesión nuevamente.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _emitir_token(usuario: Usuario, *, auth_time: int) -> Sesion:
+    token, expires_in = crear_access_token(
+        usuario_id=usuario.id,
+        rol=usuario.rol,
+        sede=usuario.sede,
+        token_version=usuario.token_version,
+        auth_time=auth_time,
+    )
+    return Sesion(usuario=usuario, access_token=token, expires_in=expires_in)
+
+
+def renovar_sesion(sesion: SesionActual) -> Sesion:
+    """Cambia un access token vigente por otro nuevo (D-13, RN-65…RN-68).
+
+    La sesión ya viene validada contra la base por ``get_sesion_actual`` (estado
+    ``ACTIVO`` y ``token_version``, RN-67). El token nuevo conserva ``auth_time`` y vence
+    a los ``JWT_ACCESS_TOKEN_EXPIRE_MINUTES``; pasadas ``JWT_SESION_MAX_HORAS`` desde
+    ``auth_time`` responde ``401 TOKEN_SESION_MAXIMA`` (RN-66). El token anterior no se
+    revoca: vence solo.
+    """
+    tope = get_settings().jwt_sesion_max_horas * 3600
+    if datetime.now(UTC).timestamp() - sesion.auth_time > tope:
+        raise _sesion_maxima()
+    return _emitir_token(sesion.usuario, auth_time=sesion.auth_time)
+
+
+async def cerrar_sesiones(db: AsyncSession, sesion: SesionActual) -> Sesion:
+    """Cierra todas las sesiones del usuario menos la actual (D-14, RN-69).
+
+    Incrementa ``token_version`` (RN-08: todos los tokens emitidos dejan de valer) y
+    devuelve uno nuevo para la pestaña actual. Conserva ``auth_time``: no es un inicio de
+    sesión nuevo, así que no estira el tope de RN-66.
+    """
+    usuario = await _bloquear(db, sesion.usuario.id)
+    usuario.token_version += 1
+    await db.commit()
+    await db.refresh(usuario)
+    return _emitir_token(usuario, auth_time=sesion.auth_time)
+
+
+# ── API pública para otros módulos (SPEC-03 §4, P3.3) ────────────────────────
+#
+# Lo que está debajo de esta línea es contrato: `spaces` y `loans` lo importan.
+# El resto de este archivo es interno de `users`.
+
+
+@dataclass(frozen=True, slots=True)
+class DatosPublicosUsuario:
+    """Identidad mínima mostrable de un usuario (P6). Nunca incluye DNI, email ni teléfono."""
+
+    id: int
+    nombre: str
+    apellido: str
+
+
+async def datos_publicos_por_ids(
+    db: AsyncSession, ids: Iterable[int]
+) -> dict[int, DatosPublicosUsuario]:
+    """Nombre y apellido por lote de ids (C2 de SPEC-05; bandeja de reservas del Perfil 4).
+
+    Función pública (P3.3, enmienda 1.1.1). No filtra por sede ni por estado (RN-38,
+    RN-39): la autorización es de quien llama, que sólo pasa ids de registros que ya
+    puede mostrar (P5, P6). **Nunca** se usa para mostrar identidades en la
+    disponibilidad de espacios o equipamiento, ni para mostrarle a un estudiante datos
+    de otro solicitante (RN-43).
+
+    - Los ids repetidos se consultan una sola vez (RN-35); una entrada vacía devuelve
+      ``{}`` sin consultar la base (RN-36); los inexistentes se omiten (RN-37).
+    - Selecciona sólo ``id``, ``nombre`` y ``apellido``, no la entidad ``Usuario``: no
+      carga DNI, email ni teléfono en la sesión del llamador (RN-40).
+    - Una sola consulta con los ids en un único parámetro arreglo (RN-41).
+    - No hace ``commit``, ``rollback`` ni ``flush``: la transacción es de quien llama (RN-42).
+    """
+    unicos = list(set(ids))
+    if not unicos:
+        return {}
+    filas = await db.execute(
+        select(Usuario.id, Usuario.nombre, Usuario.apellido).where(
+            Usuario.id == any_(bindparam("ids", unicos, type_=ARRAY(Integer)))
+        )
+    )
+    return {
+        fila.id: DatosPublicosUsuario(id=fila.id, nombre=fila.nombre, apellido=fila.apellido)
+        for fila in filas
+    }

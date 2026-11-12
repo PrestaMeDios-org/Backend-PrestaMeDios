@@ -12,3 +12,5 @@ PyJWT>=2.8
 pwdlib[argon2]>=0.2
 email-validator>=2.1
 tzdata
+python-multipart>=0.0.9
+Pillow>=11.3
