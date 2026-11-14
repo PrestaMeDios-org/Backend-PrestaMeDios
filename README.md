@@ -80,7 +80,8 @@ createdb prestamedios                # o desde psql: CREATE DATABASE prestamedio
 alembic upgrade head                 # crea tablas, tipos, restricciones y parámetros semilla
 
 # 4. Superadministrador inicial (comando de una línea; pide la contraseña por consola)
-python -m app.modules.users.cli crear-superadmin --email natalia.ader@untdf.edu.ar --nombre Natalia --apellido Ader --dni 30111222
+#    El teléfono es obligatorio en toda cuenta nueva (USR-05, SPEC-09)
+python -m app.modules.users.cli crear-superadmin --email natalia.ader@untdf.edu.ar --nombre Natalia --apellido Ader --dni 30111222 --telefono "+54 2901 555123"
 
 # 5. Servidor de desarrollo
 uvicorn app.main:app --reload        # http://localhost:8000
