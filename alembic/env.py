@@ -14,6 +14,7 @@ from app.modules.files import models as _files_models  # noqa: F401
 from app.modules.inventory import models as _inventory_models  # noqa: F401
 from app.modules.loans import models as _loans_models  # noqa: F401
 from app.modules.notifications import models as _notifications_models  # noqa: F401
+from app.modules.notifications import portada as _portada_momentaneo  # noqa: F401  MOMENTÁNEO (SPEC-10 M-02)
 from app.modules.spaces import models as _spaces_models  # noqa: F401
 from app.modules.users import models as _users_models  # noqa: F401
 
