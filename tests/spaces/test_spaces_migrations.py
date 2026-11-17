@@ -20,7 +20,7 @@ def test_modelo_excluye_solapamientos_en_reservas_aprobadas_y_en_uso():
 
 def test_migracion_actualiza_la_exclusion_para_reservas_en_uso(monkeypatch):
     migration_path = (
-        Path(__file__).parents[1]
+        Path(__file__).parents[2]
         / "alembic"
         / "versions"
         / "0003_reserva_en_uso.py"
