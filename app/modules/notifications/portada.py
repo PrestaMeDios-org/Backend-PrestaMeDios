@@ -15,14 +15,14 @@ import io
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, LargeBinary, String, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.core.deps import get_current_user, require_roles
+from app.core.deps import get_current_user, require_roles, resolver_alcance_sede
 from app.core.enums import RolUsuario
 from app.core.errors import AppError, error_responses
 from app.core.settings import ahora_lab
@@ -47,7 +47,17 @@ MAX_BYTES = MAX_MB * 1024 * 1024
 LADO_MAX = 1600
 MAX_PIXELES = 25_000_000
 MAX_IDS = 50
+MAX_ID = 2**31 - 1  # `comunicados.id` es `integer`: un id mayor no existe y PostgreSQL lo rechaza
 TIPOS = {"image/jpeg", "image/png", "image/webp"}
+
+
+# ── Dependencias internas de `notifications` (Perfil 5) ──────────────────────
+# Este archivo reusa dos funciones privadas de `notifications.service` para aplicar
+# exactamente las mismas reglas de lectura (RN-N3) y edición (RN-N5) que los comunicados.
+# Si el Perfil 5 las renombra o cambia su firma, hay que ajustarlo acá: es el único punto
+# de contacto. Pedido para que sean públicas: SPEC-10 §11, U4/U5.
+_filtro_lectura = service._filtro_lectura
+_bloquear_para_editar = service._bloquear_para_editar
 
 
 # ── Modelo ───────────────────────────────────────────────────────────────────
@@ -143,7 +153,7 @@ async def _leer_imagen(archivo: UploadFile) -> bytes:
 
 async def _guardar(db: AsyncSession, usuario: Usuario, comunicado_id: int, **valores) -> PortadaResponse:
     # Mismo permiso que editar el comunicado (RN-N5): bloquea la fila o responde 404.
-    await service._bloquear_para_editar(db, usuario, comunicado_id)
+    await _bloquear_para_editar(db, usuario, comunicado_id)
     portada = await db.get(ComunicadoPortada, comunicado_id)
     if portada is None:
         portada = ComunicadoPortada(comunicado_id=comunicado_id)
@@ -180,15 +190,10 @@ async def listar_portadas(
         raise AppError(422, "IDS_INVALIDOS", "Los ids tienen que ser números separados por coma.") from None
     if not pedidos or len(pedidos) > MAX_IDS:
         raise AppError(422, "IDS_INVALIDOS", f"Entre 1 y {MAX_IDS} ids.")
-    visibles: list[int] = []
-    for cid in pedidos:
-        try:
-            await service.obtener_comunicado(db, usuario, cid)
-            visibles.append(cid)
-        except AppError:
-            continue
-    if not visibles:
-        return []
+    if pedidos[0] < 1 or pedidos[-1] > MAX_ID:
+        raise AppError(422, "IDS_INVALIDOS", f"Los ids tienen que estar entre 1 y {MAX_ID}.")
+    # Una sola consulta: las mismas reglas de lectura que `obtener_comunicado` (RN-N3).
+    sedes = resolver_alcance_sede(usuario, None)
     filas = (
         await db.execute(
             select(
@@ -196,7 +201,12 @@ async def listar_portadas(
                 ComunicadoPortada.tema,
                 ComunicadoPortada.actualizado_en,
                 ComunicadoPortada.imagen.is_not(None).label("tiene_imagen"),
-            ).where(ComunicadoPortada.comunicado_id.in_(visibles))
+            )
+            .join(Comunicado, Comunicado.id == ComunicadoPortada.comunicado_id)
+            .where(
+                ComunicadoPortada.comunicado_id.in_(pedidos),
+                *_filtro_lectura(usuario, sedes, incluir_archivados=True, ahora=ahora_lab()),
+            )
         )
     ).all()
     return [
@@ -230,14 +240,11 @@ async def elegir_tema(
 )
 async def subir_imagen(
     comunicado_id: int,
-    request: Request,
     archivo: UploadFile = File(...),
     usuario: Usuario = Depends(_admins),
     db: AsyncSession = Depends(get_db),
 ) -> PortadaResponse:
-    largo = request.headers.get("content-length")
-    if largo and largo.isdigit() and int(largo) > MAX_BYTES + 64 * 1024:
-        raise demasiado_grande(MAX_MB)
+    # El límite de 5 MB lo aplica `_leer_imagen`: cuando esto corre, FastAPI ya recibió el cuerpo.
     jpeg = await _leer_imagen(archivo)
     return await _guardar(db, usuario, comunicado_id, tema=None, imagen=jpeg, tipo_mime="image/jpeg")
 
@@ -253,7 +260,7 @@ async def quitar_portada(
     usuario: Usuario = Depends(_admins),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    await service._bloquear_para_editar(db, usuario, comunicado_id)
+    await _bloquear_para_editar(db, usuario, comunicado_id)
     portada = await db.get(ComunicadoPortada, comunicado_id)
     if portada is not None:
         await db.delete(portada)

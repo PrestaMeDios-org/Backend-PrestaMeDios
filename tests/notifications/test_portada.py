@@ -118,3 +118,35 @@ async def test_ids_invalidos(client, crear_usuario):
     admin = await crear_usuario(R.ADMIN_LOCAL, USH)
     r = await client.get(f"{B}/portadas", params={"ids": "a,b"}, headers=auth(admin))
     assert r.status_code == 422 and r.json()["code"] == "IDS_INVALIDOS"
+
+
+@pytest.mark.parametrize("ids", ["99999999999", "0", "-3", "1,2147483648"])
+async def test_ids_fuera_de_rango(client, crear_usuario, ids):
+    """Un id que no entra en `integer` no llega a PostgreSQL: 422, no 500 (revisión del PR #39)."""
+    admin = await crear_usuario(R.ADMIN_LOCAL, USH)
+    r = await client.get(f"{B}/portadas", params={"ids": ids}, headers=auth(admin))
+    assert r.status_code == 422 and r.json()["code"] == "IDS_INVALIDOS"
+
+
+async def test_varios_ids_con_las_reglas_de_lectura(client, crear_usuario, crear_comunicado):
+    """En una sola consulta: la sede propia y los globales sí; otra sede e ids inexistentes, no."""
+    superadmin = await crear_usuario(R.SUPERADMIN, None, email="sa@untdf.edu.ar")
+    estudiante = await crear_usuario(R.ESTUDIANTE, USH, email="e@untdf.edu.ar")
+    de_ush = await crear_comunicado(USH)
+    de_rg = await crear_comunicado(RG, titulo="De Río Grande")
+    global_ = await crear_comunicado(None, titulo="Global")
+    sin_portada = await crear_comunicado(USH, titulo="Sin portada")
+    vencido = await crear_comunicado(USH, titulo="Vencido", vencido=True)
+    for c, tema in ((de_ush, "azul"), (de_rg, "verde"), (global_, "rojo"), (vencido, "amarillo")):
+        r = await client.put(f"{B}/{c.id}/portada", json={"tema": tema}, headers=auth(superadmin))
+        assert r.status_code == 200, r.text
+
+    ids = f"{de_ush.id},{de_rg.id},{global_.id},{sin_portada.id},{vencido.id},999999"
+    r = await client.get(f"{B}/portadas", params={"ids": ids}, headers=auth(estudiante))
+    assert r.status_code == 200
+    # El estudiante no ve otra sede ni lo vencido (RN-N3), igual que en `obtener_comunicado`.
+    assert sorted((p["comunicado_id"], p["tema"]) for p in r.json()) == sorted(
+        [(de_ush.id, "azul"), (global_.id, "rojo")]
+    )
+    r = await client.get(f"{B}/portadas", params={"ids": ids}, headers=auth(superadmin))
+    assert {p["comunicado_id"] for p in r.json()} == {de_ush.id, de_rg.id, global_.id, vencido.id}
