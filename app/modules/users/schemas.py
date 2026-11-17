@@ -55,7 +55,7 @@ class _DatosCuentaBase(BaseModel):
     nombre: NombrePersona
     apellido: NombrePersona
     dni: Dni
-    telefono: Telefono | None = None
+    telefono: Telefono  # obligatorio en toda cuenta nueva (USR-05, SPEC-09 RN-86)
 
     _norm_email = field_validator("email", mode="before")(_normalizar_email)
 
@@ -187,6 +187,11 @@ class CambioEstadoRequest(BaseModel):
 # ── SPEC-02 · Gestión de cuenta ──────────────────────────────────────────────
 
 
+# USR-05, SPEC-09 RN-88: el teléfono se puede cambiar, pero no borrar. Las cuentas
+# anteriores a SPEC-09 pueden no tenerlo (RN-87): sólo se valida si viene en el cuerpo.
+_TELEFONO_NO_VACIO = "El teléfono no puede quedar vacío."
+
+
 class PerfilUpdate(BaseModel):
     """Edición de datos de contacto propios (UC-10, USR-03).
 
@@ -211,6 +216,8 @@ class PerfilUpdate(BaseModel):
             raise ValueError("`password_actual` sólo se usa para cambiar el email.")
         if "email" in self.model_fields_set and self.email is None:
             raise ValueError("El email no puede quedar vacío.")
+        if "telefono" in self.model_fields_set and self.telefono is None:
+            raise ValueError(_TELEFONO_NO_VACIO)
         return self
 
 
@@ -250,6 +257,8 @@ class UsuarioAdminUpdate(BaseModel):
     def _reglas(self) -> "UsuarioAdminUpdate":
         if not self.model_fields_set:
             raise ValueError("Indicá al menos un dato a modificar.")
+        if "telefono" in self.model_fields_set and self.telefono is None:
+            raise ValueError(_TELEFONO_NO_VACIO)
         no_anulables = {"nombre", "apellido", "dni", "email", "rol", "password_nueva"}
         for campo in no_anulables & self.model_fields_set:
             if getattr(self, campo) is None:

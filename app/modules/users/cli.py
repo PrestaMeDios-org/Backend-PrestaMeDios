@@ -3,7 +3,8 @@
 Uso::
 
     python -m app.modules.users.cli crear-superadmin \\
-        --email natalia.ader@untdf.edu.ar --nombre Natalia --apellido Ader --dni 30111222
+        --email natalia.ader@untdf.edu.ar --nombre Natalia --apellido Ader --dni 30111222 \\
+        --telefono "+54 2901 555123"
 
 La contraseña se solicita por prompt oculto o se lee de
 ``BOOTSTRAP_SUPERADMIN_PASSWORD``. Es idempotente: si ya existe una cuenta
@@ -104,7 +105,7 @@ def main() -> None:
     crear.add_argument("--nombre", required=True)
     crear.add_argument("--apellido", required=True)
     crear.add_argument("--dni", required=True)
-    crear.add_argument("--telefono", default=None)
+    crear.add_argument("--telefono", required=True)  # SPEC-09 D-11, RN-86
     args = parser.parse_args()
     sys.exit(asyncio.run(_main(args)))
 
