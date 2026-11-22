@@ -16,6 +16,7 @@ API REST del sistema de préstamos de equipamiento y reservas de espacios del **
 1. [Arquitectura](#arquitectura)
 2. [Requisitos previos](#requisitos-previos)
 3. [Instalación y puesta en marcha](#instalación-y-puesta-en-marcha)
+   - [Con Docker](#con-docker)
 4. [Variables de entorno](#variables-de-entorno)
 5. [Autenticación](#autenticación)
 6. [Endpoints](#endpoints)
@@ -88,6 +89,24 @@ uvicorn app.main:app --reload        # http://localhost:8000
 ```
 
 > La aplicación **no arranca** si falta `JWT_SECRET_KEY` o tiene menos de 32 caracteres.
+
+### Con Docker
+
+Alternativa al camino manual (SPEC-11, Fase A): sólo hace falta Docker con Compose v2. Levanta PostgreSQL 16, corre las migraciones, deja la API con recarga en caliente y un buzón de correo de prueba (Mailpit).
+
+```bash
+cp .env.example .env           # completar JWT_SECRET_KEY y POSTGRES_PASSWORD
+docker compose up              # API en http://localhost:8000 · correos en http://localhost:8025
+```
+
+- `DATABASE_URL`, `TEST_DATABASE_URL` y el SMTP se fijan en `compose.yaml` para apuntar a los contenedores: los valores de `.env` para el camino manual no molestan.
+- El código de `app/`, `alembic/` y `tests/` está montado: los cambios recargan la API sin reconstruir. Si cambia `requirements*.txt`, `docker compose up --build`.
+- Tests: `docker compose exec api pytest -q` (usa la base `prestamedios_test`, creada al iniciar el volumen).
+- Migración nueva: `docker compose run --rm migrate`. Superadministrador: `docker compose exec api python -m app.modules.users.cli crear-superadmin …`.
+- Puertos ocupados en el host: `POSTGRES_PUERTO_HOST`, `API_PUERTO_HOST` y `MAILPIT_PUERTO_HOST` en `.env` (por defecto 5432, 8000 y 8025).
+- Borrar todo, base incluida: `docker compose down -v`.
+
+La imagen de producción es `docker build --target final .` (corre como usuario sin privilegios y no contiene secretos ni tests).
 
 ---
 

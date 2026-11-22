@@ -1,0 +1,21 @@
+# Contexto de build de la imagen (SPEC-11 RN-P01, AC-P02).
+.git
+.github
+.venv
+venv
+.env
+.env.*
+!.env.example
+tests
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+*.log
+*.err
+uvicorn.*
+compose*.yaml
+Dockerfile
+.dockerignore
+docker
