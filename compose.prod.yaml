@@ -1,0 +1,118 @@
+# Producción y pruebas en la computadora del laboratorio (SPEC-11 §6.1, §6.3, plan §6.1).
+#
+#   docker compose -f compose.prod.yaml up -d
+#
+# Lee .env (permisos 600, no versionado; plantilla en deploy/.env.prod.example).
+# Otro archivo: PMD_ENV_FILE=… y --env-file … (pruebas locales).
+# Ningún servicio publica puertos: todo entra por el túnel de Cloudflare (NFR-P05).
+# El frontend se construye desde el clon hermano (FRONTEND_DIR).
+name: prestamedios
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-base-datos: &base-datos
+  # Una sola fuente para la conexión: POSTGRES_* de .env.
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-prestamedios}:${POSTGRES_PASSWORD:?definir POSTGRES_PASSWORD en .env}@db:5432/${POSTGRES_DB:-prestamedios}
+  ENTORNO: produccion
+  TZ: America/Argentina/Ushuaia
+
+networks:
+  frontal: {}
+  interna:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  pgdata:
+  backups:
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-prestamedios}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?definir POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: ${POSTGRES_DB:-prestamedios}
+      TZ: America/Argentina/Ushuaia
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [interna]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      target: final
+    image: prestamedios-api:prod
+    restart: unless-stopped
+    logging: *logging
+    env_file: ${PMD_ENV_FILE:-.env}
+    environment:
+      <<: *base-datos
+      # Sólo nginx (`web`, IP fija) puede informar la IP del usuario (§6.9.2).
+      FORWARDED_ALLOW_IPS: 172.30.0.10
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+    networks: [interna]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ${FRONTEND_DIR:-../Frontend-PrestaMeDios}
+      args:
+        VITE_API_URL: ""
+    image: prestamedios-web:prod
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      API_UPSTREAM: api:8000
+    networks:
+      frontal: {}
+      interna:
+        ipv4_address: 172.30.0.10
+    depends_on:
+      api:
+        condition: service_healthy
+
+  tareas:
+    build:
+      context: .
+      target: tareas
+    image: prestamedios-tareas:prod
+    restart: unless-stopped
+    logging: *logging
+    env_file: ${PMD_ENV_FILE:-.env}
+    environment:
+      <<: *base-datos
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-prestamedios}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-prestamedios}
+    volumes:
+      - backups:/backups
+    networks: [interna]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.7
+    restart: unless-stopped
+    logging: *logging
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}  # obligatorio en la máquina del laboratorio (sin token, el túnel no levanta)
+    networks: [frontal]
+    depends_on: [web]
