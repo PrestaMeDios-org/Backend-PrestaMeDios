@@ -1,4 +1,4 @@
-"""SPEC-04 §6 · Funciones públicas de `inventory` para `loans` — INV-22 (y INV-21 a nivel servicio)."""
+"""SPEC-04 §6 · Funciones públicas de `inventory` para `loans` — INV-22, INV-28 (y INV-21 a nivel servicio)."""
 
 import asyncio
 
@@ -101,7 +101,7 @@ async def test_dos_entregas_simultaneas_de_la_misma_unidad(
     assert sorted(resultados) == ["TRANSICION_ESTADO_INVALIDA", "ok"]
 
 
-async def test_mantenimiento_desde_disponible(db, crear_equipo):  # INV-18 (servicio)
+async def test_mantenimiento_desde_disponible(db, crear_equipo):  # INV-28 (e INV-18 a nivel servicio)
     eq = await crear_equipo("CAM", unidades=((USH,),))
     uid = (await _ids(db, eq))["CAM-U1"]
     unidad = await marcar_unidad_mantenimiento(db, uid)
@@ -113,3 +113,48 @@ async def test_mantenimiento_desde_disponible(db, crear_equipo):  # INV-18 (serv
     with pytest.raises(AppError) as exc:
         await marcar_unidad_mantenimiento(db, 9999)
     assert exc.value.status_code == 404 and exc.value.code == "UNIDAD_NO_ENCONTRADA"
+
+
+@pytest.mark.parametrize("estado", [E.PRESTADO, E.BAJA])
+async def test_mantenimiento_desde_prestado_o_baja(db, crear_equipo, estado):  # INV-28
+    eq = await crear_equipo("CAM", unidades=((USH, estado),))
+    uid = (await _ids(db, eq))["CAM-U1"]
+    with pytest.raises(AppError) as exc:
+        await marcar_unidad_mantenimiento(db, uid)
+    assert exc.value.status_code == 409 and exc.value.code == "TRANSICION_ESTADO_INVALIDA"
+    await db.rollback()
+    assert (await db.get(UnidadFisica, uid)).estado is estado
+
+
+async def _estado_en_otra_sesion(sessionmaker_, uid: int) -> E:
+    async with sessionmaker_() as otra:
+        return (
+            await otra.execute(select(UnidadFisica.estado).where(UnidadFisica.id == uid))
+        ).scalar_one()
+
+
+async def test_mantenimiento_sin_commit_ni_flush(db, sessionmaker_, crear_equipo):  # INV-28
+    eq = await crear_equipo("CAM", unidades=((USH,),))
+    uid = (await _ids(db, eq))["CAM-U1"]
+    async with sessionmaker_() as sesion:
+        unidad = await marcar_unidad_mantenimiento(sesion, uid)
+        # sin flush: el cambio sigue pendiente en la sesión de quien llama
+        assert unidad in sesion.dirty
+        assert await _estado_en_otra_sesion(sessionmaker_, uid) is E.DISPONIBLE
+        await sesion.rollback()
+    assert await _estado_en_otra_sesion(sessionmaker_, uid) is E.DISPONIBLE
+
+
+async def test_devolucion_con_dano_nunca_queda_disponible(
+    db, sessionmaker_, crear_equipo
+):  # INV-28 (AC-L59, EC-L15 de SPEC-05)
+    eq = await crear_equipo("CAM", unidades=((USH, E.PRESTADO),))
+    uid = (await _ids(db, eq))["CAM-U1"]
+    async with sessionmaker_() as sesion:
+        await liberar_unidad(sesion, uid)
+        await marcar_unidad_mantenimiento(sesion, uid)
+        await sesion.flush()  # como haría `loans` antes de su commit
+        # otra transacción lee el último estado confirmado: prestado, nunca disponible
+        assert await _estado_en_otra_sesion(sessionmaker_, uid) is E.PRESTADO
+        await sesion.commit()
+    assert await _estado_en_otra_sesion(sessionmaker_, uid) is E.MANTENIMIENTO
