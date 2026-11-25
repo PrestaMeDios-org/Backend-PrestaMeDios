@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,16 +28,22 @@ from app.modules.files.service import ArchivoContenido, abrir_archivo, vincular_
 from app.modules.inventory.service import (
     bloquear_unidad,
     datos_equipamiento_por_ids,
+    liberar_unidad,
+    marcar_unidad_mantenimiento,
+    marcar_unidad_prestada,
     unidad_es_asignable,
     unidades_asignables,
 )
 from app.modules.loans.enums import (
+    ESTADOS_DETALLE_EN_CURSO,
     ESTADOS_DETALLE_QUE_OCUPAN,
     EstadoDetalleEnum,
     EstadoOrdenEnum,
+    SituacionOrdenEnum,
 )
 from app.modules.loans.models import DetallePrestamo, OrdenHistorialEstado, OrdenPedido
 from app.modules.loans.schemas import (
+    DetalleEstadoUpdate,
     LineaUnidadesLibresResponse,
     OrdenPedidoCreate,
     OrdenPedidoEstadoUpdate,
@@ -185,20 +191,29 @@ async def listar_bandeja(
     sede: SedeEnum | None,
     limit: int,
     offset: int,
+    situacion: SituacionOrdenEnum | None = None,
 ) -> list[OrdenPedidoResponse]:
     """Bandeja de validación (PRE-15): órdenes de la jurisdicción del administrador.
 
     - Sedes con ``resolver_alcance_sede``: el ``ADMIN_LOCAL`` siempre la suya (pedir
       otra responde ``403 SEDE_FUERA_DE_ALCANCE``); el ``SUPERADMIN``, la indicada o
       ambas. El filtro va en el ``WHERE`` (RN-L26).
+    - ``situacion`` (opcional, RN-L31, spec v1.0.3): ``en_curso`` si alguna línea está
+      ``pendiente``, ``reservado`` o ``entregado``; ``finalizada`` si no. Con
+      ``estado=aprobada&situacion=en_curso`` es la lista del mostrador (plan §9.4.4).
     - De la más vieja a la más nueva, para atender primero lo que espera hace más.
     - Con el resumen del solicitante (P6).
     """
     sedes = resolver_alcance_sede(actor, sede)
+    stmt = select(OrdenPedido).where(OrdenPedido.sede.in_(sedes), OrdenPedido.estado == estado)
+    if situacion is not None:
+        en_curso = exists().where(
+            DetallePrestamo.orden_id == OrdenPedido.id,
+            DetallePrestamo.estado.in_(ESTADOS_DETALLE_EN_CURSO),
+        )
+        stmt = stmt.where(en_curso if situacion is SituacionOrdenEnum.EN_CURSO else ~en_curso)
     stmt = (
-        select(OrdenPedido)
-        .where(OrdenPedido.sede.in_(sedes), OrdenPedido.estado == estado)
-        .order_by(OrdenPedido.fecha_solicitud.asc(), OrdenPedido.id.asc())
+        stmt.order_by(OrdenPedido.fecha_solicitud.asc(), OrdenPedido.id.asc())
         .limit(limit)
         .offset(offset)
     )
@@ -258,6 +273,9 @@ def _resolver(
 
 
 _SQLSTATE_EXCLUSION = "23P01"
+
+# Líneas cuyo equipo ya salió del laboratorio (RN-L16, spec v1.0.3).
+_ESTADOS_ENTREGADOS = (EstadoDetalleEnum.ENTREGADO, EstadoDetalleEnum.DEVUELTO)
 
 
 def _es_solapamiento(exc: IntegrityError) -> bool:
@@ -399,9 +417,10 @@ async def cambiar_estado_orden(
     - ``aprobada``: administrador con jurisdicción, orden ``pendiente``, una unidad por
       línea (``_aprobar``). Un solapamiento que rechaza la base responde
       ``409 UNIDAD_NO_DISPONIBLE`` sin cambios parciales (RN-L13).
-    - ``cancelada`` por el administrador: solo una orden ``aprobada`` sin líneas
-      ``entregado`` (si no, ``409``), con motivo (``422 MOTIVO_REQUERIDO``). Las líneas
-      ``reservado`` pasan a ``cancelado`` y liberan su unidad (AC-L33, AC-L34).
+    - ``cancelada`` por el administrador: solo una orden ``aprobada`` en la que no se
+      entregó ninguna línea (ni ``entregado`` ni ``devuelto``, spec v1.0.3; si no,
+      ``409``), con motivo (``422 MOTIVO_REQUERIDO``). Las líneas ``reservado`` pasan a
+      ``cancelado`` y liberan su unidad (AC-L33, AC-L34).
     """
     pedido = payload.estado
     # 1. Aprobar y rechazar son administrativos, sea o no el dueño (AC-L29).
@@ -451,10 +470,12 @@ async def cambiar_estado_orden(
                 lineas_desde=(EstadoDetalleEnum.PENDIENTE,),
             )
         else:
-            # Cancelación del administrador (RN-L16, AC-L33, AC-L34): solo una aprobada,
-            # sin entregas, con motivo. Las líneas reservado liberan su unidad.
+            # Cancelación del administrador (RN-L16, AC-L33, AC-L34): solo una aprobada
+            # en la que no se entregó nada, con motivo. Con algo ya entregado (aunque se
+            # haya devuelto), las líneas reservado se cancelan de a una (forzada), para
+            # que la orden cierre según RN-L30 (spec v1.0.3).
             if actual is not EstadoOrdenEnum.APROBADA or any(
-                d.estado is EstadoDetalleEnum.ENTREGADO for d in orden.detalles
+                d.estado in _ESTADOS_ENTREGADOS for d in orden.detalles
             ):
                 raise transicion_invalida(orden)
             historial = _resolver(
@@ -482,6 +503,125 @@ async def cambiar_estado_orden(
         await db.rollback()
         raise
     await db.refresh(orden)  # resuelto_en lo pone la base
+    return (await respuestas_de_ordenes(db, actor, [orden]))[0]
+
+
+# ── Mostrador (PATCH /ordenes/{id}/detalles/{detalle_id}/estado) ─────────────
+
+
+def _linea_transicion_invalida(detalle: DetallePrestamo) -> AppError:
+    return AppError(
+        409,
+        "TRANSICION_INVALIDA",
+        f"La línea está {detalle.estado.value} y no admite esta acción.",
+        estado_actual=detalle.estado.value,
+        detalle_id=detalle.id,
+    )
+
+
+# Una orden aprobada sigue abierta mientras alguna línea esté en uno de estos estados.
+_ESTADOS_QUE_SOSTIENEN_LA_ORDEN = (
+    EstadoDetalleEnum.RESERVADO,
+    EstadoDetalleEnum.ENTREGADO,
+    EstadoDetalleEnum.DEVUELTO,
+)
+
+
+def _cerrar_si_no_quedan_lineas(
+    orden: OrdenPedido, actor: Usuario | None, motivo: str
+) -> OrdenHistorialEstado | None:
+    """Cierre de la orden (RN-L30) después de una cancelación forzada o un no retiro.
+
+    Si ninguna línea queda ``reservado``, ``entregado`` o ``devuelto``, la orden pasa a
+    ``cancelada`` con su resolución y una fila de historial (que devuelve para agregar a
+    la sesión). Si no, sigue ``aprobada`` y devuelve ``None``. ``actor`` es ``None``
+    cuando cierra el sistema (no retiro, Fase 4). No toca las líneas.
+    """
+    if any(d.estado in _ESTADOS_QUE_SOSTIENEN_LA_ORDEN for d in orden.detalles):
+        return None
+    actor_id = actor.id if actor else None
+    historial = OrdenHistorialEstado(
+        orden_id=orden.id,
+        estado_anterior=orden.estado,
+        estado_nuevo=EstadoOrdenEnum.CANCELADA,
+        motivo=motivo,
+        actor_id=actor_id,
+    )
+    orden.estado = EstadoOrdenEnum.CANCELADA
+    orden.motivo_resolucion = motivo
+    orden.resuelto_por_id = actor_id
+    orden.resuelto_en = func.now()
+    return historial
+
+
+async def cambiar_estado_detalle(
+    db: AsyncSession,
+    actor: Usuario,
+    orden_id: int,
+    detalle_id: int,
+    payload: DetalleEstadoUpdate,
+) -> OrdenPedidoResponse:
+    """Entregar, recibir la devolución o cancelar una línea (PRE-13, PRE-17, plan §9.4.1).
+
+    El rol lo controla el router (solo administradores). Después: (2) leer y bloquear la
+    orden con alcance (404, también si la línea no es de esa orden); (3) transición
+    válida desde el estado de la línea (409); (4) datos (422); (5) aplicar y ``commit``.
+    Ante un ``AppError`` después de bloquear, incluidos los de ``inventory``,
+    ``rollback`` antes de propagarlo (RN-L14): no hay cambios parciales.
+
+    - ``entregado`` (RN-L19): línea ``reservado``; ``inventory.marcar_unidad_prestada``
+      (``409 TRANSICION_ESTADO_INVALIDA`` si la unidad no está ``disponible``, AC-L37)
+      y ``entregado_en``. Sin restricción horaria: el control es presencial.
+    - ``devuelto`` (RN-L20): línea ``entregado``; ``inventory.liberar_unidad`` y, con
+      ``a_mantenimiento``, ``marcar_unidad_mantenimiento`` en la misma transacción
+      (AC-L59); ``devuelto_en`` y la observación.
+    - ``cancelado`` (RN-L17, forzada): línea ``reservado``, con motivo; deja de ocupar
+      la unidad sin tocar su estado en ``inventory``, y la orden cierra si no le
+      quedan líneas vigentes (RN-L30).
+
+    ``fin_ocupacion`` no cambia (D-L16). Entregar y devolver no cambian el estado de la
+    orden ni agregan historial: la fecha queda en la línea.
+    """
+    pedido = payload.estado
+    try:
+        orden = await _orden_con_alcance(db, actor, orden_id, bloquear=True)
+        detalle = next((d for d in orden.detalles if d.id == detalle_id), None)
+        if detalle is None:
+            raise orden_no_encontrada()
+        unidad_id = detalle.unidad_fisica_id
+
+        if pedido is EstadoDetalleEnum.ENTREGADO:
+            if detalle.estado is not EstadoDetalleEnum.RESERVADO or unidad_id is None:
+                raise _linea_transicion_invalida(detalle)
+            await marcar_unidad_prestada(db, unidad_id)
+            detalle.estado = EstadoDetalleEnum.ENTREGADO
+            detalle.entregado_en = ahora_lab()
+
+        elif pedido is EstadoDetalleEnum.DEVUELTO:
+            if detalle.estado is not EstadoDetalleEnum.ENTREGADO or unidad_id is None:
+                raise _linea_transicion_invalida(detalle)
+            await liberar_unidad(db, unidad_id)
+            if payload.a_mantenimiento:
+                await marcar_unidad_mantenimiento(db, unidad_id)
+            detalle.estado = EstadoDetalleEnum.DEVUELTO
+            detalle.devuelto_en = ahora_lab()
+            detalle.observacion_devolucion = payload.observacion
+
+        else:  # cancelación forzada
+            if detalle.estado is not EstadoDetalleEnum.RESERVADO:
+                raise _linea_transicion_invalida(detalle)
+            motivo = _motivo_requerido(payload.motivo)
+            detalle.estado = EstadoDetalleEnum.CANCELADO
+            detalle.motivo_cancelacion = motivo
+            historial = _cerrar_si_no_quedan_lineas(orden, actor, motivo)
+            if historial is not None:
+                db.add(historial)
+
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    await db.refresh(orden)  # resuelto_en, si la orden cerró, lo pone la base
     return (await respuestas_de_ordenes(db, actor, [orden]))[0]
 
 
@@ -764,8 +904,7 @@ class MovimientoUnidad:
     """Una línea que usó (o tiene reservada) la unidad, para su historial (PRE-12).
 
     Campos de SPEC-04 §5.5. ``entregado_en``, ``devuelto_en`` y
-    ``observacion_devolucion`` valen ``None`` hasta la migración ``0012`` (Fase 3); ya
-    están en la firma para que el contrato no cambie.
+    ``observacion_devolucion`` se registran en el mostrador (Fase 3, migración ``0022``).
     """
 
     orden_id: int
@@ -804,6 +943,9 @@ async def historial_de_unidad(
             DetallePrestamo.estado,
             DetallePrestamo.retiro_pactado,
             DetallePrestamo.devolucion_pactada,
+            DetallePrestamo.entregado_en,
+            DetallePrestamo.devuelto_en,
+            DetallePrestamo.observacion_devolucion,
         )
         .join(OrdenPedido, OrdenPedido.id == DetallePrestamo.orden_id)
         .where(
@@ -820,14 +962,17 @@ async def historial_de_unidad(
     solicitantes = await datos_publicos_por_ids(db, {f.solicitante_id for f in filas})
     return [
         MovimientoUnidad(
-            orden_id=orden_id,
-            detalle_id=detalle_id,
-            solicitante=solicitantes.get(solicitante_id),
-            estado=estado,
-            retiro_pactado=retiro,
-            devolucion_pactada=devolucion,
+            orden_id=f.orden_id,
+            detalle_id=f.id,
+            solicitante=solicitantes.get(f.solicitante_id),
+            estado=f.estado,
+            retiro_pactado=f.retiro_pactado,
+            devolucion_pactada=f.devolucion_pactada,
+            entregado_en=f.entregado_en,
+            devuelto_en=f.devuelto_en,
+            observacion_devolucion=f.observacion_devolucion,
         )
-        for orden_id, detalle_id, solicitante_id, estado, retiro, devolucion in filas
+        for f in filas
     ]
 
 

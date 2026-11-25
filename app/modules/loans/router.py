@@ -10,6 +10,9 @@ documentan con ``error_responses(...)``. Dónde aparece cada código (§6.3):
     negocio (``LIMITE_DIAS_EXCEDIDO``, ``FRANJA_FUERA_DE_HORARIO``, etc.).
   - ``PATCH /ordenes/{id}/estado``: 409 ``TRANSICION_INVALIDA`` y
     ``UNIDAD_NO_DISPONIBLE`` (la base rechazó un solapamiento, SQLSTATE 23P01).
+  - ``PATCH /ordenes/{id}/detalles/{detalle_id}/estado``: 409 ``TRANSICION_INVALIDA``
+    (estado de la línea) y ``TRANSICION_ESTADO_INVALIDA`` (de ``inventory``: la unidad
+    no está en el estado que hace falta); 422 ``MOTIVO_REQUERIDO``.
 """
 
 from fastapi import APIRouter, Depends, Query, Response, status
@@ -21,9 +24,10 @@ from app.core.errors import error_responses
 from app.database import get_db
 from app.modules.files.service import respuesta_descarga
 from app.modules.loans import service
-from app.modules.loans.enums import EstadoOrdenEnum
+from app.modules.loans.enums import EstadoOrdenEnum, SituacionOrdenEnum
 from app.modules.loans.models import OrdenPedido
 from app.modules.loans.schemas import (
+    DetalleEstadoUpdate,
     LineaUnidadesLibresResponse,
     OrdenPedidoCreate,
     OrdenPedidoEstadoUpdate,
@@ -110,6 +114,13 @@ async def listar_mis_ordenes(
 )
 async def listar_bandeja(
     estado: EstadoOrdenEnum = Query(default=EstadoOrdenEnum.PENDIENTE),
+    situacion: SituacionOrdenEnum | None = Query(
+        default=None,
+        description=(
+            "`en_curso`: con alguna línea pendiente, reservada o entregada; `finalizada`: "
+            "el resto (RN-L31). Con `estado=aprobada&situacion=en_curso`, la lista del mostrador."
+        ),
+    ),
     sede: SedeEnum | None = Query(
         default=None,
         description="Solo SUPERADMIN. Un ADMIN_LOCAL que pide otra sede recibe 403.",
@@ -124,7 +135,7 @@ async def listar_bandeja(
     Por defecto, las pendientes, de la más vieja a la más nueva, con nombre y apellido
     del solicitante (P6).
     """
-    return await service.listar_bandeja(db, actor, estado, sede, limit, offset)
+    return await service.listar_bandeja(db, actor, estado, sede, limit, offset, situacion)
 
 
 @router.get(
@@ -210,3 +221,32 @@ async def cambiar_estado_orden(
     por eso lo decide el servicio.
     """
     return await service.cambiar_estado_orden(db, actor, orden_id, payload)
+
+
+# ── Mostrador (Fase 3) ───────────────────────────────────────────────────────
+
+
+@router.patch(
+    "/ordenes/{orden_id}/detalles/{detalle_id}/estado",
+    response_model=OrdenPedidoResponse,
+    summary="Entregar, recibir la devolución o cancelar una línea (mostrador)",
+    responses=error_responses(401, 403, 404, 409, 422),
+)
+async def cambiar_estado_detalle(
+    orden_id: int,
+    detalle_id: int,
+    payload: DetalleEstadoUpdate,
+    actor: Usuario = Depends(_solo_admins),
+    db: AsyncSession = Depends(get_db),
+) -> OrdenPedidoResponse:
+    """Mostrador de la sede (PRE-13, PRE-17). Devuelve la orden completa.
+
+    - `entregado`: la línea `reservado` sale del laboratorio y la unidad queda `prestado`.
+    - `devuelto`: la línea `entregado` vuelve, con observación opcional; con
+      `a_mantenimiento`, la unidad pasa a `mantenimiento` en la misma transacción.
+    - `cancelado`: cancelación forzada de una línea `reservado`, con motivo. Si no le
+      quedan líneas vigentes, la orden pasa a `cancelada`.
+
+    Una orden de otra sede, o una línea que no es de la orden, responde `404`.
+    """
+    return await service.cambiar_estado_detalle(db, actor, orden_id, detalle_id, payload)

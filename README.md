@@ -40,7 +40,7 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 | `files` | `/api/v1/files` | PRE-05 (aval), USR-03 (foto) | Implementado (SPEC-03 Fase B2) |
 | `inventory` | `/api/v1/inventory` | PRE-01, PRE-02, PRE-12, PRE-14, PRE-19 | Implementado |
 | `spaces` | `/api/v1/spaces` | RES-01…RES-05, GLO-02, GLO-04 | Implementado |
-| `loans` | `/api/v1/loans` | PRE-03…PRE-11, PRE-13, PRE-15…PRE-18, PRE-20 | Sólo contratos: los endpoints exigen sesión y responden `501 NO_IMPLEMENTADO` |
+| `loans` | `/api/v1/loans` | PRE-03…PRE-11, PRE-13, PRE-15…PRE-18, PRE-20 | SPEC-05 Fases 1 a 3: reglas con el horario de la sede, solicitud con aval, "mis órdenes", bandeja (con `situacion` para el mostrador), aprobar con unidades, rechazar, cancelar, y en el mostrador entregar, recibir la devolución (con pase a mantenimiento si vuelve dañada) y cancelación forzada por línea (`PATCH /ordenes/{id}/detalles/{detalle_id}/estado`). La renovación responde `501`; faltan el no retiro, el calendario maestro y el panel docente |
 | `notifications` | `/api/v1/notifications` | NOV-01, NOV-02, NOV-04 (NOV-03 diferido) | Comunicados implementados (SPEC-06 Fase A); notificaciones personales en la Fase B |
 | `assistant` | — | IA-01…IA-03 | Pendiente |
 
