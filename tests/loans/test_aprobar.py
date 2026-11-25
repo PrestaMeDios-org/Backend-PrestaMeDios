@@ -521,6 +521,27 @@ async def test_el_ajuste_fuera_de_la_franja_responde_422(
     await _sigue_pendiente(db, orden.id)
 
 
+async def test_el_ajuste_usa_el_horario_de_la_sede_de_la_orden(
+    client, crear_usuario, crear_equipamiento, crear_orden, set_parametro
+):  # RN-L04, RN-L18, H2 de SPEC-09: Río Grande abre a las 11:00; el superadmin no tiene sede
+    await set_parametro("horario.rio_grande.apertura", "11:00")
+    camara = await crear_equipamiento(sede=RG)
+    orden = await crear_orden(camara, sede=RG)
+    superadmin = await crear_usuario(S)
+    devolucion = _a_las(RETIRO + timedelta(days=1), 14)
+
+    temprano = await _aprobar(
+        client, superadmin, orden, _ids(camara), **_ajuste(_a_las(RETIRO, 10), devolucion)
+    )
+    a_tiempo = await _aprobar(
+        client, superadmin, orden, _ids(camara), **_ajuste(_a_las(RETIRO, 11), devolucion)
+    )
+
+    assert temprano.status_code == 422
+    assert _codigo(temprano) == "FRANJA_FUERA_DE_HORARIO"
+    assert a_tiempo.status_code == 200, a_tiempo.json()
+
+
 async def test_el_ajuste_que_supera_el_plazo_responde_422(
     client, db, crear_usuario, crear_equipamiento, crear_orden
 ):  # AC-L25, RN-L06: el ítem admite 4 días

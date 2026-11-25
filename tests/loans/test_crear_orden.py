@@ -159,6 +159,24 @@ async def test_fuera_de_la_franja_se_rechaza(
     assert r.json()["campo"] == campo
 
 
+async def test_la_franja_es_la_de_la_sede_del_solicitante(
+    client, crear_usuario, equipo, set_parametro
+):  # RN-L04, AC-L63, ADR-022 a: Río Grande abre a las 10:30 y Ushuaia a las 09:00
+    await set_parametro("horario.rio_grande.apertura", "10:30")
+    de_rg = await crear_usuario(ESTUDIANTE, SedeEnum.RIO_GRANDE)
+    de_ush = await crear_usuario(ESTUDIANTE, SedeEnum.USHUAIA)
+    camara_rg = await equipo(sede=SedeEnum.RIO_GRANDE)
+    camara_ush = await equipo(sede=SedeEnum.USHUAIA)
+
+    en_rg = await client.post(URL, json=_pedido(camara_rg), headers=auth(de_rg))  # retiro 10:00
+    en_ush = await client.post(URL, json=_pedido(camara_ush), headers=auth(de_ush))
+
+    assert en_rg.status_code == 422
+    assert (en_rg.json()["code"], en_rg.json()["campo"]) == ("FRANJA_FUERA_DE_HORARIO", "retiro")
+    assert "10:30" in en_rg.json()["detail"]
+    assert en_ush.status_code == 201, en_ush.json()
+
+
 async def test_sin_anticipacion_minima_se_rechaza(client, crear_usuario, equipo, set_parametro):
     # AC-L08, RN-L05, RN-L28: el retiro (en 3 días, < 72 h) queda antes de ahora + 100 h
     await set_parametro("solicitud.anticipacion_min_horas", 100)
