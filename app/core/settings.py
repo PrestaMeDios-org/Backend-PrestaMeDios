@@ -9,7 +9,7 @@ from functools import lru_cache
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 JWT_ALGORITHM = "HS256"
@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     """Variables de entorno de la aplicación."""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # Entorno (SPEC-11 §6.9.1, D-08): en producción se apaga la documentación de la
+    # API y se rechazan valores que sólo sirven en desarrollo.
+    entorno: Literal["desarrollo", "produccion"] = Field(default="desarrollo", alias="ENTORNO")
+    # Proxies de confianza para X-Forwarded-For (SPEC-11 §6.9.2): IPs o redes CIDR
+    # separadas por coma. En producción, la IP fija de `web` (nginx).
+    forwarded_allow_ips: str = Field(default="127.0.0.1", alias="FORWARDED_ALLOW_IPS")
 
     database_url: str = Field(
         default="postgresql+asyncpg://postgres:postgres@localhost:5432/prestamedios",
@@ -60,6 +67,9 @@ class Settings(BaseSettings):
         default="PrestaMeDios <no-responder@localhost>", alias="EMAIL_FROM"
     )
     frontend_url: str = Field(default="http://localhost:8443", alias="FRONTEND_URL")
+    # Tope de correos por día del proveedor gratuito (SPEC-11 §6.7, D-14). Sin definir,
+    # no hay límite y el transporte no toca la base.
+    email_limite_diario: int | None = Field(default=None, ge=1, alias="EMAIL_LIMITE_DIARIO")
 
     # Recuperación de contraseña (SPEC-03 §5.2, D-07): seguridad técnica, no GLO-03.
     recuperacion_vigencia_minutos: int = Field(
@@ -72,9 +82,29 @@ class Settings(BaseSettings):
         default=20, ge=1, le=1000, alias="RECUPERACION_MAX_POR_IP_HORA"
     )
 
+    @model_validator(mode="after")
+    def _validar_produccion(self) -> "Settings":
+        """Con ``ENTORNO=produccion`` la app no arranca con valores de desarrollo (AC-P11)."""
+        if self.entorno != "produccion":
+            return self
+        errores = []
+        if _es_local(self.frontend_url):
+            errores.append("FRONTEND_URL apunta a localhost")
+        if any(_es_local(o) for o in self.cors_origins_list):
+            errores.append("CORS_ORIGINS incluye localhost")
+        if self.email_backend == "memoria":
+            errores.append("EMAIL_BACKEND=memoria sólo sirve para tests")
+        if errores:
+            raise ValueError("Configuración inválida para ENTORNO=produccion: " + "; ".join(errores))
+        return self
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+
+def _es_local(url: str) -> bool:
+    return "localhost" in url or "127.0.0.1" in url
 
 
 @lru_cache

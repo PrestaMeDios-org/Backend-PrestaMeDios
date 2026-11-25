@@ -6,6 +6,8 @@ cuándo lo decide el módulo que llama (USR-02 en `users`, los avisos en `notifi
 - Plantillas en ``app/core/plantillas_correo/<TIPO>.txt``: primera línea asunto, el
   resto cuerpo, con variables ``$nombre`` de ``string.Template`` (RN-71).
 - Backends: ``smtp`` (``smtplib`` en un hilo, timeout 10 s) y ``memoria`` (tests, RN-76).
+- Límite diario opcional (``EMAIL_LIMITE_DIARIO``, SPEC-11 §6.7): antes de enviar se
+  reserva un cupo en ``envios_correo_diarios`` de forma atómica; sin cupo, no se envía.
 - El log nunca lleva el contexto ni el cuerpo: pueden traer el enlace de recuperación
   (RN-74, NFR-19).
 """
@@ -21,8 +23,14 @@ from enum import StrEnum
 from functools import lru_cache
 from importlib import resources
 from string import Template
+from typing import Literal
 
-from app.core.settings import Settings, get_settings
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import SQLAlchemyError
+
+from app import database
+from app.core.models import EnvioCorreoDiario
+from app.core.settings import Settings, ahora_lab, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +47,20 @@ class TipoCorreo(StrEnum):
     NOTIFICACION = "NOTIFICACION"  # genérico para `notifications` (RN-77, ADR-023)
 
 
+MotivoError = Literal["smtp", "limite_diario", "contador"]
+
+
 class ErrorEnvioCorreo(Exception):
-    """El transporte no pudo entregar el mensaje (RN-73). Nunca lleva el contenido."""
+    """El transporte no pudo entregar el mensaje (RN-73). Nunca lleva el contenido.
+
+    ``motivo`` (SPEC-11 §6.7, X2): ``smtp`` (falló el servidor; el valor por defecto),
+    ``limite_diario`` (se llegó a ``EMAIL_LIMITE_DIARIO``: reintentar otro día) o
+    ``contador`` (no se pudo consultar el cupo en la base).
+    """
+
+    def __init__(self, mensaje: str = "No se pudo enviar el correo.", *, motivo: MotivoError = "smtp"):
+        super().__init__(mensaje)
+        self.motivo: MotivoError = motivo
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +162,38 @@ def _enviar_smtp(settings: Settings, mensaje: EmailMessage) -> None:
         raise ErrorEnvioCorreo(f"Falló el envío por SMTP ({type(exc).__name__}).") from exc
 
 
+async def _reservar_cupo_diario(limite: int) -> None:
+    """Suma uno al contador del día si no llegó a ``limite``; si llegó, no envía (AC-P18).
+
+    Un solo ``INSERT … ON CONFLICT DO UPDATE … WHERE`` atómico: dos envíos simultáneos
+    no pueden usar el mismo último cupo. Usa su propia sesión y confirma en el acto: no
+    participa de la transacción de quien llama. Un envío SMTP que falla después de
+    reservar no devuelve el cupo (el proveedor también lo cuenta).
+    """
+    fecha = ahora_lab().date()
+    sentencia = (
+        pg_insert(EnvioCorreoDiario)
+        .values(fecha=fecha, cantidad=1)
+        .on_conflict_do_update(
+            index_elements=[EnvioCorreoDiario.fecha],
+            set_={"cantidad": EnvioCorreoDiario.cantidad + 1},
+            where=EnvioCorreoDiario.cantidad < limite,
+        )
+        .returning(EnvioCorreoDiario.cantidad)
+    )
+    try:
+        async with database.AsyncSessionLocal() as sesion:
+            reservado = (await sesion.execute(sentencia)).first()
+            await sesion.commit()
+    except (SQLAlchemyError, OSError) as exc:
+        raise ErrorEnvioCorreo(
+            f"No se pudo consultar el cupo diario de correos ({type(exc).__name__}).",
+            motivo="contador",
+        ) from exc
+    if reservado is None:
+        raise ErrorEnvioCorreo("Se alcanzó el límite diario de correos.", motivo="limite_diario")
+
+
 async def enviar_correo(
     tipo: TipoCorreo,
     destinatario: str,
@@ -158,13 +210,17 @@ async def enviar_correo(
     settings = get_settings()
     correo = renderizar_correo(tipo, contexto)  # antes de enviar: una variable faltante falla acá
     try:
+        if settings.email_limite_diario is not None:
+            await _reservar_cupo_diario(settings.email_limite_diario)
         if settings.email_backend == "memoria":
             _bandeja.append(CorreoEnviado(tipo, destinatario, correo.asunto, correo.cuerpo))
         else:
             await asyncio.to_thread(
                 _enviar_smtp, settings, _mensaje(settings, destinatario, correo)
             )
-    except ErrorEnvioCorreo:
-        logger.warning("Correo no enviado: tipo=%s usuario_id=%s", tipo.value, usuario_id)
+    except ErrorEnvioCorreo as exc:
+        logger.warning(
+            "Correo no enviado: tipo=%s usuario_id=%s motivo=%s", tipo.value, usuario_id, exc.motivo
+        )
         raise
     logger.info("Correo enviado: tipo=%s usuario_id=%s", tipo.value, usuario_id)
