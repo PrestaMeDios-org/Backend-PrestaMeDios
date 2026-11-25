@@ -99,6 +99,16 @@ class DetallePrestamo(Base):
             "estado NOT IN ('reservado', 'entregado') OR unidad_fisica_id IS NOT NULL",
             name="unidad_si_ocupa",
         ),
+        # Fase 3 (migración 0022, P7.1): una línea entregada tiene fecha de entrega,
+        # y una devuelta, las dos.
+        CheckConstraint(
+            "estado <> 'entregado' OR entregado_en IS NOT NULL",
+            name="entrega_registrada",
+        ),
+        CheckConstraint(
+            "estado <> 'devuelto' OR (entregado_en IS NOT NULL AND devuelto_en IS NOT NULL)",
+            name="devolucion_registrada",
+        ),
         # Misma unidad + períodos que se pisan = rechazo (SQLSTATE 23P01).
         # Solo compara las líneas que ocupan; el resto libera la unidad.
         # Nombre completo a mano: NAMING_CONVENTION no tiene clave "ex".
@@ -136,6 +146,11 @@ class DetallePrestamo(Base):
     # Arranca igual a devolucion_pactada; un proceso de demoras la extiende
     # sin perder la fecha pactada (necesaria para calcular "demorado").
     fin_ocupacion: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Mostrador (Fase 3, PRE-13 y PRE-17).
+    entregado_en: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    devuelto_en: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    observacion_devolucion: Mapped[str | None] = mapped_column(String(500))
+    motivo_cancelacion: Mapped[str | None] = mapped_column(String(500))
     # Columna generada por la base: el ORM nunca la escribe.
     periodo: Mapped[Range[datetime]] = mapped_column(
         TSTZRANGE,
