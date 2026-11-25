@@ -218,3 +218,40 @@ async def test_cancelacion_del_dueno_simultanea_con_la_aprobacion(
             assert final.detalles[0].estado is EstadoDetalleEnum.CANCELADO
             assert final.detalles[0].unidad_fisica_id is None
         assert await _transiciones(db, orden.id) == 1
+
+
+# ── Mostrador (Fase 3): dos acciones sobre la misma línea ────────────────────
+
+
+def _patch_linea(client, usuario, orden: OrdenPedido, cuerpo: dict):
+    detalle_id = orden.detalles[0].id
+    return client.patch(
+        f"{BASE}/ordenes/{orden.id}/detalles/{detalle_id}/estado",
+        json=cuerpo,
+        headers=auth(usuario),
+    )
+
+
+ENTREGA = {"estado": "entregado"}
+FORZADA = {"estado": "cancelado", "motivo": "La unidad se rompió"}
+
+
+@pytest.mark.parametrize("otra", [ENTREGA, FORZADA], ids=["entrega", "forzada"])
+async def test_una_entrega_contra_otra_accion_sobre_la_misma_linea_una_gana(
+    client, db, admin, crear_equipamiento, crear_linea, otra
+):  # AC-L55, RN-L14 (plan §9.5)
+    for ronda in range(RONDAS):
+        camara = await crear_equipamiento()
+        orden = await crear_linea(camara, camara.unidades[0], EstadoDetalleEnum.RESERVADO)
+
+        respuestas = await asyncio.gather(
+            _patch_linea(client, admin, orden, ENTREGA),
+            _patch_linea(client, admin, orden, otra),
+        )
+
+        codigos = sorted(r.status_code for r in respuestas)
+        assert codigos == [200, 409], (ronda, [r.json() for r in respuestas])
+        perdedora = next(r for r in respuestas if r.status_code == 409)
+        assert perdedora.json()["code"] == "TRANSICION_INVALIDA"
+        linea = (await _orden_en_base(db, orden.id)).detalles[0]
+        assert linea.estado in (EstadoDetalleEnum.ENTREGADO, EstadoDetalleEnum.CANCELADO)

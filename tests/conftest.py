@@ -346,6 +346,9 @@ def crear_equipamiento(db):
     return _crear
  
  
+_ENTREGADAS = (EstadoDetalleEnum.ENTREGADO, EstadoDetalleEnum.DEVUELTO)
+
+
 @pytest.fixture
 def crear_linea(db, crear_usuario):
     """Fábrica: una orden con una línea sobre ``unidad`` en el estado indicado."""
@@ -376,6 +379,9 @@ def crear_linea(db, crear_usuario):
                 retiro_pactado=retiro,
                 devolucion_pactada=devolucion,
                 fin_ocupacion=devolucion,
+                # CHECK entrega_registrada y devolucion_registrada (migración 0022).
+                entregado_en=retiro if estado in _ENTREGADAS else None,
+                devuelto_en=devolucion if estado is EstadoDetalleEnum.DEVUELTO else None,
             )
         ]
         db.add(orden)

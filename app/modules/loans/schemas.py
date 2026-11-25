@@ -94,6 +94,18 @@ class DetallePrestamoResponse(BaseModel):
     retiro_pactado: AwareDatetime
     devolucion_pactada: AwareDatetime
     fin_ocupacion: AwareDatetime
+    entregado_en: AwareDatetime | None = Field(
+        default=None, description="Cuándo se entregó en el mostrador (PRE-13)."
+    )
+    devuelto_en: AwareDatetime | None = Field(
+        default=None, description="Cuándo se recibió la devolución (PRE-13)."
+    )
+    observacion_devolucion: str | None = Field(
+        default=None, description="Estado físico del equipo al devolverlo."
+    )
+    motivo_cancelacion: str | None = Field(
+        default=None, description="Motivo de la cancelación forzada de la línea (PRE-17)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -265,4 +277,52 @@ class OrdenPedidoEstadoUpdate(BaseModel):
                 raise ValueError("Solo la aprobación admite asignaciones")
             if self.nuevo_retiro or self.nueva_devolucion:
                 raise ValueError("Solo la aprobación admite ajuste horario")
+        return self
+
+
+class DetalleEstadoUpdate(BaseModel):
+    """Mostrador: entregar, recibir la devolución o cancelar una línea (PRE-13, PRE-17).
+
+    Solo valida la forma: ``observacion`` y ``a_mantenimiento`` van solo con ``devuelto``
+    y ``motivo`` solo con ``cancelado``. Que el motivo sea obligatorio en la cancelación
+    forzada lo resuelve el servicio (``422 MOTIVO_REQUERIDO``, como al rechazar).
+    """
+
+    model_config = _INPUT_CONFIG
+
+    estado: Literal[
+        EstadoDetalleEnum.ENTREGADO,
+        EstadoDetalleEnum.DEVUELTO,
+        EstadoDetalleEnum.CANCELADO,
+    ] = Field(examples=["devuelto"])
+    observacion: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="Solo al devolver: estado físico del equipo.",
+        examples=["Vuelve con la tecla Enter floja."],
+    )
+    a_mantenimiento: bool = Field(
+        default=False,
+        description=(
+            "Solo al devolver: la unidad vuelve dañada y pasa a `mantenimiento` en la "
+            "misma transacción (RN-L20)."
+        ),
+    )
+    motivo: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="Solo en la cancelación forzada, y obligatorio en ella.",
+        examples=["La unidad se dañó en otro préstamo."],
+    )
+
+    @model_validator(mode="after")
+    def _validar_segun_estado(self) -> "DetalleEstadoUpdate":
+        if self.estado is not EstadoDetalleEnum.DEVUELTO and (
+            self.observacion is not None or self.a_mantenimiento
+        ):
+            raise ValueError("La observación y el pase a mantenimiento van solo al devolver")
+        if self.estado is not EstadoDetalleEnum.CANCELADO and self.motivo is not None:
+            raise ValueError("El motivo va solo en la cancelación forzada")
         return self
