@@ -55,3 +55,38 @@ COPY pytest.ini ./
 USER app
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+# --- tareas: cron sin root, copias y mantenimiento (SPEC-11 §6.4, plan §6.3) --
+FROM final AS tareas
+
+USER root
+
+# Cliente de PostgreSQL 16 (el mismo que el servidor) desde el repositorio oficial
+# PGDG; age (cifrado de copias), rclone (copia externa), curl (latidos) y tzdata.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg tzdata \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+        https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+    && . /etc/os-release \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends postgresql-client-16 age rclone \
+    && apt-get purge -y gnupg && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# supercronic: cron para contenedores, sin root (D-07). Suma publicada en la release.
+ENV SUPERCRONIC_URL=https://github.com/aptible/supercronic/releases/download/v0.2.51/supercronic-linux-amd64 \
+    SUPERCRONIC_SHA1SUM=1692066e350a88ff4d7d6474fe3c7a6c41ec5e89
+RUN curl -fsSL -o /usr/local/bin/supercronic "$SUPERCRONIC_URL" \
+    && echo "${SUPERCRONIC_SHA1SUM}  /usr/local/bin/supercronic" | sha1sum -c - \
+    && chmod +x /usr/local/bin/supercronic
+
+COPY deploy ./deploy
+RUN chmod +x deploy/*.sh \
+    && install -d -o app -g app /backups
+
+USER app
+HEALTHCHECK NONE
+CMD ["supercronic", "-passthrough-logs", "/app/deploy/crontab"]

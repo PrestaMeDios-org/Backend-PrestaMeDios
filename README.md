@@ -47,7 +47,7 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 
 **Roles:** `SUPERADMIN` (ambas sedes) · `ADMIN_LOCAL` (una sede) · `DOCENTE` · `ESTUDIANTE`. Los usuarios sólo operan sobre los recursos de su sede, excepto el Superadministrador.
 
-**Seguridad transversal.** Todos los endpoints, salvo registro, login, recuperación de contraseña y `/health`, requieren sesión. El solicitante de una reserva es siempre el usuario autenticado; los recursos creados por un administrador local reciben su sede automáticamente; un recurso de otra sede se responde como inexistente (`404`). Las cuentas creadas o restablecidas por un administrador deben cambiar la contraseña antes de operar (`403 CAMBIO_PASSWORD_REQUERIDO`).
+**Seguridad transversal.** Todos los endpoints, salvo registro, login, recuperación de contraseña, `/health` y `/health/db`, requieren sesión. El solicitante de una reserva es siempre el usuario autenticado; los recursos creados por un administrador local reciben su sede automáticamente; un recurso de otra sede se responde como inexistente (`404`). Las cuentas creadas o restablecidas por un administrador deben cambiar la contraseña antes de operar (`403 CAMBIO_PASSWORD_REQUERIDO`).
 
 **API pública de `users` para otros módulos.** `app.modules.users.service.datos_publicos_por_ids(db, ids)` devuelve `{id: DatosPublicosUsuario(id, nombre, apellido)}` en una sola consulta, para mostrar al solicitante en `spaces` y `loans` sin importar el modelo `Usuario` (SPEC-03 Fase A). No filtra por sede ni por estado: quien la llama sólo pasa ids que ya puede mostrar, y nunca la usa para exponer identidades en la disponibilidad.
 
@@ -110,6 +110,21 @@ docker compose up              # API en http://localhost:8000 · correos en http
 
 La imagen de producción es `docker build --target final .` (corre como usuario sin privilegios y no contiene secretos ni tests).
 
+### Producción
+
+La pila de producción (SPEC-11, Fase C) está en `compose.prod.yaml`: PostgreSQL, API, frontend con nginx (desde el clon hermano `../Frontend-PrestaMeDios`), tareas programadas y el túnel de Cloudflare, sin puertos publicados. Las variables van en `.env` a partir de [`deploy/.env.prod.example`](deploy/.env.prod.example). En `deploy/`:
+
+| Archivo | Para qué |
+| --- | --- |
+| `instalar.sh` | Prepara una Ubuntu Server 24.04 limpia (Docker, usuario, clones en un tag) |
+| `actualizar.sh <tag>` | Copia previa, código del tag, build, migraciones y reinicio; si la migración falla, no reinicia |
+| `backup.sh` | Copia diaria cifrada con `age`, local y externa con `rclone` (la corre el contenedor `tareas`) |
+| `restaurar.sh <copia> <clave>` | Restaura una copia en una base nueva sin tocar la que está en uso |
+| `crontab`, `latido.sh` | Tareas programadas y aviso al monitoreo |
+| `compose.prueba-local.yaml` | Probar la pila de producción en una máquina propia (publica `web` en `127.0.0.1:8080`, sin túnel) |
+
+La guía completa de instalación y operación está en el repo de documentación (`docs/instalacion.md` y `docs/operacion.md`).
+
 ---
 
 ## Variables de entorno
@@ -124,6 +139,9 @@ Definidas en `.env` (ver [`.env.example`](.env.example)). **Nunca versionar `.en
 | `JWT_SESION_MAX_HORAS` | No | `8` | Tope de una sesión desde el login: pasado ese tiempo no se renueva y hay que volver a iniciar sesión |
 | `CORS_ORIGINS` | No | `http://localhost:8443` | Orígenes permitidos, separados por coma |
 | `TEST_DATABASE_URL` | Sólo tests | — | Base dedicada; su nombre debe contener `test` |
+| `ENTORNO` | No | `desarrollo` | `produccion` apaga `/docs`, `/redoc` y `/openapi.json`, y no deja arrancar con `localhost` en `FRONTEND_URL` o `CORS_ORIGINS` ni con `EMAIL_BACKEND=memoria` (SPEC-11) |
+| `FORWARDED_ALLOW_IPS` | No | `127.0.0.1` | Proxies de confianza (IPs o redes CIDR) cuya `X-Forwarded-For` se usa como IP del cliente, p. ej. para el límite por IP de la recuperación. En producción, la IP de nginx |
+| `EMAIL_LIMITE_DIARIO` | No | sin límite | Tope de correos por día (plan gratuito del proveedor). Al llegar, `enviar_correo` lanza `ErrorEnvioCorreo` con `motivo="limite_diario"` sin enviar |
 | `BOOTSTRAP_SUPERADMIN_PASSWORD` | No | — | Contraseña para el CLI sin prompt interactivo |
 | `ARCHIVO_FOTO_MAX_MB` · `ARCHIVO_PDF_MAX_MB` | No | `2` · `10` | Tamaño máximo de la foto de perfil y del PDF de aval |
 | `ARCHIVO_HUERFANO_HORAS` | No | `24` | Antigüedad desde la que `limpiar-huerfanos` borra los archivos sin vincular |
@@ -222,7 +240,7 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | Comunicados | `GET /api/v1/notifications/comunicados[/{id}]` | Comunicados de la sede del usuario más los globales. Estudiantes y docentes ven sólo los vigentes; `sede` sólo para el Superadministrador e `incluir_archivados` sólo para administradores |
 | | `POST /api/v1/notifications/comunicados` | Publicar. `ADMIN_LOCAL`: en su sede. `SUPERADMIN`: `sede` o `es_global` (uno de los dos) |
 | | `PATCH /api/v1/notifications/comunicados/{id}` · `PATCH …/{id}/estado` | Editar título, contenido y vencimiento; archivar o reactivar |
-| Salud | `GET /health` | Health check |
+| Salud | `GET /health` · `GET /health/db` | Vida del proceso · la base responde (`200` u `503 {"status": "sin_base"}`); públicos, para el monitoreo |
 
 ---
 

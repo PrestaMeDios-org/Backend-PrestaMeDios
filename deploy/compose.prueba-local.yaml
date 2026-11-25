@@ -1,0 +1,16 @@
+# Para probar la pila de producción en la máquina de un integrante (SPEC-11 RN-P10,
+# plan §9): publica `web` en 127.0.0.1 y deja afuera el túnel.
+#
+#   export COMPOSE_EXTRA="-f deploy/compose.prueba-local.yaml"
+#   docker compose -f compose.prod.yaml $COMPOSE_EXTRA up -d db api web tareas
+#   → http://127.0.0.1:${WEB_PUERTO_LOCAL:-8080}
+#
+# Los scripts de deploy/ respetan COMPOSE_EXTRA. Nunca usar en la máquina del laboratorio.
+services:
+  web:
+    ports:
+      - "127.0.0.1:${WEB_PUERTO_LOCAL:-8080}:80"
+  cloudflared:
+    profiles: [tunel]
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-sin-tunel}

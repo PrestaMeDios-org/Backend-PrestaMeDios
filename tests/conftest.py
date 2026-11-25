@@ -36,6 +36,7 @@ from app.core.enums import EstadoCuenta, RolUsuario, SedeEnum  # noqa: E402
 from app.core.security import crear_access_token, hash_password  # noqa: E402
 from app.database import Base, get_db  # noqa: E402
 from app.main import app  # noqa: E402
+from app.core import models as _core_models  # noqa: E402, F401  SPEC-11
 from app.modules.config import models as _config_models  # noqa: E402, F401
 from app.modules.config.models import ParametroGlobal  # noqa: E402
 from app.modules.config.seed import PARAMETROS_SEMILLA  # noqa: E402
@@ -56,6 +57,7 @@ PASSWORD = "Camara2026!"
 
 _TABLAS = (
     "notificaciones, comunicados, "  # SPEC-06 (conformidad del Perfil 1, T-01)
+    "envios_correo_diarios, "  # SPEC-11 §6.7
     "intentos_recuperacion, "  # SPEC-03 B1: sin FK, el CASCADE de `usuarios` no la vacía
     "parametros_globales_historial, parametros_globales, usuarios_historial_estado, "
     "reservas_espacios, bloqueos_espacios, espacios, ordenes_historial_estado, "

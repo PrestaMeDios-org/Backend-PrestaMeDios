@@ -1,0 +1,16 @@
+# Tareas programadas de producción (SPEC-11 §6.4). Las corre `supercronic` en el
+# contenedor `tareas`, con TZ=America/Argentina/Ushuaia (RN-P08).
+#
+# Cada línea: comando idempotente que falla con código ≠ 0 (RN-P07) && latido al
+# monitoreo (§6.8). Para sumar una tarea (X1, X2), agregar una línea en el mismo PR
+# que crea el comando, con su variable MONITOREO_PING_<TAREA> en .env.prod.example.
+
+# Copia de seguridad cifrada, local y externa (§6.6).
+0 2 * * * /app/deploy/backup.sh && /app/deploy/latido.sh MONITOREO_PING_BACKUP
+
+# Archivos subidos y nunca vinculados (SPEC-03 RN-58).
+0 3 * * * python -m app.modules.files.cli limpiar-huerfanos && /app/deploy/latido.sh MONITOREO_PING_LIMPIEZA
+
+# Pendientes de otros perfiles (agregarlas cuando existan los comandos):
+#   X1, Perfil 3: python -m app.modules.loans.cli procesar-vencimientos
+#   X2, Perfil 5: python -m app.modules.notifications.cli enviar-correos
