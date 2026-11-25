@@ -53,8 +53,12 @@ def _validar_rango(retiro: datetime, devolucion: datetime) -> None:
 # Reglas operativas
 # ---------------------------------------------------------------------------
 class ReglasResponse(BaseModel):
-    """Reglas operativas vigentes, leídas de `config` (SPEC-05 §6.2, D-L07)."""
+    """Reglas operativas vigentes, leídas de `config` (SPEC-05 §6.2, D-L07).
 
+    El horario es el de ``sede`` (ADR-022 a); la anticipación y los plazos son comunes.
+    """
+
+    sede: SedeEnum = Field(examples=["Ushuaia"])
     horario_apertura: time = Field(examples=["09:00:00"])
     horario_cierre: time = Field(examples=["16:00:00"])
     anticipacion_min_horas: int = Field(examples=[24])

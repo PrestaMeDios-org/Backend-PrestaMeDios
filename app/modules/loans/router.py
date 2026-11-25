@@ -45,14 +45,19 @@ _solo_admins = require_roles(RolUsuario.ADMIN_LOCAL, RolUsuario.SUPERADMIN)
     "/reglas",
     response_model=ReglasResponse,
     summary="Reglas operativas vigentes",
-    responses=error_responses(401),
+    responses=error_responses(401, 403, 422),
 )
 async def consultar_reglas(
+    sede: SedeEnum | None = Query(
+        default=None,
+        description="Obligatoria para el SUPERADMIN. El resto ve la de su sede (pedir otra: 403).",
+    ),
     actor: Usuario = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> ReglasResponse:
-    """Horario, anticipación y plazos vigentes, para armar el formulario (PRE-06, PRE-07)."""
-    return await service.reglas(db)
+    """Horario de la sede, anticipación y plazos vigentes, para armar el formulario
+    (PRE-06, PRE-07, AC-L63)."""
+    return await service.reglas(db, service.sede_de_reglas(actor, sede))
 
 
 # ── Solicitante (estudiante / docente) ───────────────────────────────────────
