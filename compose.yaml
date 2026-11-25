@@ -1,0 +1,74 @@
+# Entorno de desarrollo con Docker (SPEC-11 §4.3, plan §4.1).
+#
+#   docker compose up            # base, migraciones, API en :8000 y Mailpit en :8025
+#   docker compose exec api pytest -q
+#
+# Lee `.env` (el mismo del camino manual). Necesita POSTGRES_PASSWORD y
+# JWT_SECRET_KEY; las URLs de base y el SMTP se fijan acá para apuntar a los
+# contenedores. No es la configuración de producción (compose.prod.yaml, Fase C).
+
+x-api: &api
+  build:
+    context: .
+    target: dev
+  image: prestamedios-api:dev
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-prestamedios}:${POSTGRES_PASSWORD:?definir POSTGRES_PASSWORD en .env}@db:5432/prestamedios
+    TEST_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-prestamedios}:${POSTGRES_PASSWORD}@db:5432/prestamedios_test
+    EMAIL_BACKEND: smtp
+    SMTP_HOST: mailpit
+    SMTP_PORT: "1025"
+    SMTP_TLS: ninguno
+    SMTP_USER: ""
+    SMTP_PASSWORD: ""
+    # /app no es escribible por el usuario `app`: sin caché de pytest.
+    PYTEST_ADDOPTS: -p no:cacheprovider
+  volumes:
+    - ./app:/app/app:ro
+    - ./alembic:/app/alembic:ro
+    - ./tests:/app/tests:ro
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-prestamedios}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?definir POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: prestamedios
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PUERTO_HOST:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d prestamedios"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *api
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *api
+    ports:
+      - "${API_PUERTO_HOST:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "${MAILPIT_PUERTO_HOST:-8025}:8025"
+
+volumes:
+  pgdata:
