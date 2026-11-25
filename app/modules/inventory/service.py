@@ -61,13 +61,20 @@ async def bloquear_unidad(db: AsyncSession, unidad_id: int) -> UnidadFisica | No
     y ``estado``; no asigna atributos (los cambios pasan por las funciones de
     cambio de estado). Para bloquear varias unidades en una transacción, hacerlo
     en orden ascendente de id para evitar interbloqueos (RN-L11 de SPEC-05).
+
+    ``populate_existing`` refresca la unidad con lo que hay en la base, salvo que la
+    sesión ya tenga un cambio pendiente sobre ella: en ese caso esta misma
+    transacción la bloqueó antes, nadie más pudo tocarla y lo pendiente es lo
+    vigente. Así ``liberar_unidad`` seguido de ``marcar_unidad_mantenimiento`` en
+    una transacción funciona sin ``flush`` (SPEC-04 §6.2, INV-28; las sesiones
+    del proyecto usan ``autoflush=False``).
     """
-    stmt = (
-        select(UnidadFisica)
-        .where(UnidadFisica.id == unidad_id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
+    pendiente = any(
+        isinstance(obj, UnidadFisica) and obj.id == unidad_id for obj in db.dirty
     )
+    stmt = select(UnidadFisica).where(UnidadFisica.id == unidad_id).with_for_update()
+    if not pendiente:
+        stmt = stmt.execution_options(populate_existing=True)
     return await db.scalar(stmt)
 
 
