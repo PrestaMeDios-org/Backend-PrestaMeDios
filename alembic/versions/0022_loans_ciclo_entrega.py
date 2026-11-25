@@ -16,7 +16,7 @@ pero una base de pruebas podría tenerlas.
 La spec la preveía como ``0012``; ese número ya se usó (C19).
 
 Revision ID: 0022_loans_ciclo_entrega
-Revises: 0020_notifications_portada
+Revises: 0021_core_envios_correo
 Create Date: 2026-11-25
 """
 
@@ -26,7 +26,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0022_loans_ciclo_entrega"
-down_revision: Union[str, None] = "0020_notifications_portada"
+down_revision: Union[str, None] = "0021_core_envios_correo"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

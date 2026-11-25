@@ -37,7 +37,7 @@ def _op_falso(monkeypatch, migracion) -> Mock:
 def test_encadena_con_la_cabeza_de_develop():  # C19, plan §9.2 (V9)
     migracion = _cargar()
     assert migracion.revision == "0022_loans_ciclo_entrega"
-    assert migracion.down_revision == "0020_notifications_portada"
+    assert migracion.down_revision == "0021_core_envios_correo"
 
 
 def test_upgrade_agrega_las_columnas_completa_las_fechas_y_despues_crea_los_check(monkeypatch):
