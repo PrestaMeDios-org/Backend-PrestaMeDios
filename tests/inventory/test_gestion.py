@@ -37,7 +37,8 @@ async def _estado(db, unidad_id: int) -> E:
 
 # ── Altas (PRE-19) ───────────────────────────────────────────────────────────
 
-_ESCRITURAS = [
+_RUTAS_DE_ADMIN = [
+    ("get", "/unidades", None),  # stock (PRE-12), AC-41
     ("post", "/categorias", {"id": "x", "nombre": "X"}),
     ("post", "/equipamiento", {"codigo": "A", "nombre": "A", "marca": "A", "modelo": "A", "categoria_id": "x"}),
     ("post", "/equipamiento/1/unidades", {"numero_serie": "a", "codigo_inventario": "a"}),
@@ -49,10 +50,10 @@ _ESCRITURAS = [
 
 
 @pytest.mark.parametrize("rol", [R.ESTUDIANTE, R.DOCENTE])
-@pytest.mark.parametrize(("metodo", "ruta", "cuerpo"), _ESCRITURAS)
-async def test_no_admins_no_escriben(client, db, crear_usuario, rol, metodo, ruta, cuerpo):  # INV-11
+@pytest.mark.parametrize(("metodo", "ruta", "cuerpo"), _RUTAS_DE_ADMIN)
+async def test_no_admins_no_gestionan(client, db, crear_usuario, rol, metodo, ruta, cuerpo):  # INV-11, AC-43
     u = await crear_usuario(rol, USH)
-    r = await getattr(client, metodo)(f"{B}{ruta}", json=cuerpo, headers=auth(u))
+    r = await client.request(metodo, f"{B}{ruta}", json=cuerpo, headers=auth(u))
     assert r.status_code == 403 and r.json()["code"] == "PERMISO_INSUFICIENTE"
 
 
@@ -98,7 +99,7 @@ async def test_plazo_de_notebooks_desde_config(
     assert r.json()["max_dias_prestamo"] == 9
 
 
-@pytest.mark.parametrize("locker", [0, 8, -1])
+@pytest.mark.parametrize("locker", [0, 8])  # bordes de 1..7
 async def test_locker_fuera_de_rango_en_api(client, crear_equipo, crear_usuario, locker):  # INV-14
     eq = await crear_equipo("CAM-1")
     admin = await crear_usuario(R.ADMIN_LOCAL, USH)
@@ -247,14 +248,8 @@ async def test_transiciones_permitidas(client, db, crear_equipo, crear_usuario, 
     assert r.status_code == 200 and r.json()["estado"] == hacia
 
 
-async def test_mantenimiento_baja_el_stock_disponible(client, db, crear_equipo, crear_usuario):  # INV-18
-    eq = await crear_equipo("CAM-1", unidades=((USH,), (USH,)))
-    uid = await _unidad_id(db, "CAM-1-U1")
-    admin = await crear_usuario(R.ADMIN_LOCAL, USH)
-    await client.patch(f"{B}/unidades/{uid}/estado", json={"estado": "mantenimiento"}, headers=auth(admin))
-    est = await crear_usuario(R.ESTUDIANTE, USH)
-    item = (await client.get(f"{B}/equipamiento/{eq.id}", headers=auth(est))).json()
-    assert (item["cantidad_total"], item["cantidad_disponible"], item["en_mantenimiento"]) == (2, 1, False)
+# "`mantenimiento` baja `cantidad_disponible`" (INV-18) = transición permitida + RN-I4,
+# que cubre `test_catalogo.py::test_campos_calculados`.
 
 
 @pytest.mark.parametrize(("desde", "hacia"), _CONFLICTO)

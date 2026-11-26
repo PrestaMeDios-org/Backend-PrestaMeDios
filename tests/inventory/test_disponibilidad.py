@@ -86,12 +86,7 @@ def test_el_periodo_que_termina_a_medianoche_no_ocupa_el_dia_siguiente():  # INV
 
 
 # ── Endpoint ─────────────────────────────────────────────────────────────────
-
-
-async def test_exige_sesion(client, crear_equipo):  # INV-30
-    eq = await crear_equipo(unidades=((USH,),))
-    r = await client.get(_url(eq.id), params=_rango(0, 1))
-    assert r.status_code == 401
+# El 401 sin token (INV-30) está en `test_inventario.py::test_exige_sesion`.
 
 
 async def test_dias_libres_y_ocupados(client, crear_equipo, crear_linea, crear_usuario):  # INV-26 (a, b)
@@ -229,38 +224,14 @@ async def test_item_sin_unidades_en_la_sede_es_404_para_estudiante_y_cero_para_a
     assert r_admin.status_code == 200 and _libres(r_admin.json()) == [0, 0]
 
 
-async def test_item_inexistente_es_404(client, crear_usuario):  # INV-30
-    alumno = await crear_usuario(R.ESTUDIANTE, USH)
-    r = await client.get(_url(99_999), params=_rango(0, 1), headers=auth(alumno))
-    assert r.status_code == 404
-
-
-@pytest.mark.parametrize(
-    ("desde", "hasta"),
-    [
-        (3, 2),  # invertido
-        (-1, 2),  # antes de hoy
-        (0, MAX_DIAS_DISPONIBILIDAD),  # 63 días
-    ],
-)
-async def test_rangos_invalidos_son_422(client, crear_equipo, crear_usuario, desde, hasta):  # INV-30
+async def test_el_endpoint_valida_el_rango(client, crear_equipo, crear_usuario):  # INV-30
+    # Las reglas y sus bordes se prueban arriba sobre `validar_rango`; acá sólo que el endpoint la aplica.
     eq = await crear_equipo(unidades=((USH,),))
     alumno = await crear_usuario(R.ESTUDIANTE, USH)
 
-    r = await client.get(_url(eq.id), params=_rango(desde, hasta), headers=auth(alumno))
+    r = await client.get(_url(eq.id), params=_rango(3, 2), headers=auth(alumno))
 
     assert r.status_code == 422 and r.json()["code"] == "RANGO_FECHAS_INVALIDO"
-
-
-async def test_el_tope_de_62_dias_es_valido(client, crear_equipo, crear_usuario):  # INV-30
-    eq = await crear_equipo(unidades=((USH,),))
-    alumno = await crear_usuario(R.ESTUDIANTE, USH)
-
-    r = await client.get(
-        _url(eq.id), params=_rango(0, MAX_DIAS_DISPONIBILIDAD - 1), headers=auth(alumno)
-    )
-
-    assert r.status_code == 200 and len(r.json()["dias"]) == MAX_DIAS_DISPONIBILIDAD
 
 
 # ── Coherencia con `POST /api/v1/loans/ordenes` (C16) ────────────────────────

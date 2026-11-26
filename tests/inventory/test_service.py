@@ -72,12 +72,27 @@ async def test_entrega_y_devolucion(db, crear_equipo):  # INV-22
     assert exc.value.status_code == 404 and exc.value.code == "UNIDAD_NO_ENCONTRADA"
 
 
-async def test_no_se_presta_en_mantenimiento(db, crear_equipo):  # INV-22
-    eq = await crear_equipo("CAM", unidades=((USH, E.MANTENIMIENTO),))
+@pytest.mark.parametrize("estado", [E.MANTENIMIENTO, E.BAJA])
+async def test_no_se_presta_en_mantenimiento_ni_en_baja(db, crear_equipo, estado):  # INV-22, RN-I4
+    eq = await crear_equipo("CAM", unidades=((USH, estado),))
     uid = (await _ids(db, eq))["CAM-U1"]
     with pytest.raises(AppError) as exc:
         await marcar_unidad_prestada(db, uid)
-    assert exc.value.code == "TRANSICION_ESTADO_INVALIDA"
+    assert exc.value.status_code == 409 and exc.value.code == "TRANSICION_ESTADO_INVALIDA"
+    await db.rollback()
+    assert (await db.get(UnidadFisica, uid)).estado is estado
+
+
+@pytest.mark.parametrize("estado", [E.MANTENIMIENTO, E.BAJA])
+async def test_solo_se_libera_una_unidad_prestada(db, crear_equipo, estado):  # PRE-13, RN-I3
+    # Una devolución nunca deja `disponible` una unidad en mantenimiento o dada de baja.
+    eq = await crear_equipo("CAM", unidades=((USH, estado),))
+    uid = (await _ids(db, eq))["CAM-U1"]
+    with pytest.raises(AppError) as exc:
+        await liberar_unidad(db, uid)
+    assert exc.value.status_code == 409 and exc.value.code == "TRANSICION_ESTADO_INVALIDA"
+    await db.rollback()
+    assert (await db.get(UnidadFisica, uid)).estado is estado
 
 
 async def test_dos_entregas_simultaneas_de_la_misma_unidad(
