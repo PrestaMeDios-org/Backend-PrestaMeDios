@@ -42,6 +42,8 @@ from app.modules.inventory.schemas import (
     EquipamientoPublicoResponse,
     EquipamientoResponse,
     EquipamientoUpdate,
+    MovimientoUnidadResponse,
+    UnidadEstadoResponse,
     UnidadFisicaCreate,
     UnidadFisicaEstadoUpdate,
     UnidadFisicaResponse,
@@ -51,6 +53,11 @@ from app.modules.inventory.service import (
     bloquear_unidad,
     unidad_no_encontrada,
     validar_transicion_admin,
+)
+from app.modules.loans.service import (
+    MovimientoUnidad,
+    historial_de_unidad,
+    reservas_futuras_de_unidad,
 )
 from app.modules.users.models import Usuario
 
@@ -422,6 +429,31 @@ async def listar_unidades(
     return list(result.all())
 
 
+@router.get(
+    "/unidades/{unidad_id}/historial",
+    response_model=list[MovimientoUnidadResponse],
+    summary="Historial de usuarios de una unidad física (administración)",
+    responses=error_responses(401, 403, 404, 422),
+)
+async def historial_unidad(
+    unidad_id: int,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    actor: Usuario = Depends(_solo_admins),
+    db: AsyncSession = Depends(get_db),
+) -> list[MovimientoUnidad]:
+    """Líneas de préstamo de la unidad, de la más reciente a la más antigua (PRE-12).
+
+    - Unidad inexistente o de otra sede → ``404`` (P5), antes de consultar `loans`.
+    - Los datos y la paginación son de ``loans.historial_de_unidad`` (SPEC-04 §5.5).
+    - Del solicitante sólo ``id``, ``nombre`` y ``apellido`` (P6).
+    """
+    unidad = await db.get(UnidadFisica, unidad_id)
+    if unidad is None or not puede_ver_sede(actor, unidad.sede):
+        raise unidad_no_encontrada()
+    return await historial_de_unidad(db, unidad_id, actor, limit=limit, offset=offset)
+
+
 @router.patch(
     "/unidades/{unidad_id}",
     response_model=UnidadFisicaResponse,
@@ -446,7 +478,7 @@ async def editar_unidad(
 
 @router.patch(
     "/unidades/{unidad_id}/estado",
-    response_model=UnidadFisicaResponse,
+    response_model=UnidadEstadoResponse,
     summary="Cambiar el estado de una unidad (mantenimiento, baja, disponible)",
     responses=error_responses(401, 403, 404, 409, 422),
 )
@@ -455,13 +487,17 @@ async def cambiar_estado_unidad(
     payload: UnidadFisicaEstadoUpdate,
     actor: Usuario = Depends(_solo_admins),
     db: AsyncSession = Depends(get_db),
-) -> UnidadFisica:
+) -> UnidadEstadoResponse:
     """Cambia el estado de una unidad (PRE-14).
 
     - ``mantenimiento`` = "En Mantenimiento" (temporal); ``baja`` = "Fuera de servicio"
       (definitivo); ``disponible`` rehabilita una unidad en mantenimiento (D-03, D-09).
     - ``prestado`` no se acepta: lo gestiona `loans` (D-02).
     - Las unidades prestadas y las dadas de baja no admiten cambios manuales.
+    - Si pasa a ``mantenimiento`` o ``baja``, informa las reservas aprobadas que
+      empiezan desde ahora (``reservas_afectadas``, ``ordenes_afectadas``), leídas
+      después del ``commit`` para no alargar el bloqueo (PRE-17, SPEC-04 §5.3). La
+      cancelación forzada es de `loans`.
     """
     unidad = await bloquear_unidad(db, unidad_id)
     if unidad is None or not puede_ver_sede(actor, unidad.sede):
@@ -473,8 +509,13 @@ async def cambiar_estado_unidad(
             "El estado 'prestado' lo gestiona el módulo de préstamos.",
         )
     if payload.estado is unidad.estado:
-        return unidad
+        return UnidadEstadoResponse.model_validate(unidad)
     validar_transicion_admin(unidad.estado, payload.estado)
     unidad.estado = payload.estado
     await db.commit()
-    return unidad
+    respuesta = UnidadEstadoResponse.model_validate(unidad)
+    if payload.estado in (EstadoUnidadEnum.MANTENIMIENTO, EstadoUnidadEnum.BAJA):
+        reservas = await reservas_futuras_de_unidad(db, unidad_id, desde=ahora_lab())
+        respuesta.reservas_afectadas = len(reservas)
+        respuesta.ordenes_afectadas = list(dict.fromkeys(r.orden_id for r in reservas))
+    return respuesta

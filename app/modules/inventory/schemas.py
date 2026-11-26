@@ -5,7 +5,7 @@
 """
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
@@ -58,6 +58,18 @@ class UnidadFisicaResponse(UnidadFisicaBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+
+
+class UnidadEstadoResponse(UnidadFisicaResponse):
+    """Respuesta del cambio de estado de una unidad (PRE-14, PRE-17; SPEC-04 §5.3).
+
+    Si el estado cambió a ``mantenimiento`` o ``baja``, informa las reservas aprobadas
+    de la unidad que empiezan desde ahora; si no, ambos campos son ``null``. Sólo
+    cantidad e ids de orden: ningún dato del solicitante (RN-I7, P6).
+    """
+
+    reservas_afectadas: int | None = Field(default=None, ge=0, examples=[2])
+    ordenes_afectadas: list[int] | None = Field(default=None, examples=[[12, 15]])
 
 
 class UnidadFisicaEstadoUpdate(BaseModel):
@@ -231,3 +243,37 @@ class DisponibilidadResponse(BaseModel):
     hasta: date = Field(..., examples=["2026-11-30"])
     unidades_asignables: int = Field(..., ge=0, examples=[3])
     dias: list[DiaDisponibilidad]
+
+
+# ---------------------------------------------------------------------------
+# Historial de usuarios por unidad (PRE-12, SPEC-04 §5.5)
+# ---------------------------------------------------------------------------
+class SolicitanteResumen(BaseModel):
+    """Identidad mínima del solicitante: nunca DNI, email ni teléfono (P6)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(..., examples=[42])
+    nombre: str = Field(..., examples=["Ana"])
+    apellido: str = Field(..., examples=["Pérez"])
+
+
+class MovimientoUnidadResponse(BaseModel):
+    """Una línea de préstamo que usó (o tiene reservada) la unidad (PRE-12).
+
+    Espejo de ``loans.service.MovimientoUnidad``. ``entregado_en``, ``devuelto_en`` y
+    ``observacion_devolucion`` valen ``null`` hasta que `loans` sume la migración
+    ``0012`` (Fase 3 de SPEC-05).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    orden_id: int = Field(..., examples=[12])
+    detalle_id: int = Field(..., examples=[31])
+    solicitante: SolicitanteResumen | None = Field(default=None)
+    estado: str = Field(..., examples=["devuelto"])
+    retiro_pactado: datetime = Field(..., examples=["2026-11-10T10:00:00-03:00"])
+    devolucion_pactada: datetime = Field(..., examples=["2026-11-12T15:00:00-03:00"])
+    entregado_en: datetime | None = Field(default=None, examples=[None])
+    devuelto_en: datetime | None = Field(default=None, examples=[None])
+    observacion_devolucion: str | None = Field(default=None, examples=[None])
