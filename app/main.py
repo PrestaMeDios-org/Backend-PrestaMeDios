@@ -15,6 +15,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app import database
 
+from app.core.cache import SinCacheMiddleware
 from app.core.errors import AppError, app_error_handler
 from app.core.settings import get_settings
 from app.modules.config.router import router as config_router
@@ -55,6 +56,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Ninguna respuesta de la API se guarda en caché (SPEC-12 RN-90): una pestaña duplicada
+# podía recibir el `/auth/me` de otro usuario.
+app.add_middleware(SinCacheMiddleware)
 
 # IP real del usuario detrás de nginx (SPEC-11 §6.9.2, RN-54): sólo se cree a
 # X-Forwarded-For si el pedido llega desde un proxy de FORWARDED_ALLOW_IPS. Va en la
