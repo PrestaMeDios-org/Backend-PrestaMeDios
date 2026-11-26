@@ -51,6 +51,8 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 
 **API pública de `users` para otros módulos.** `app.modules.users.service.datos_publicos_por_ids(db, ids)` devuelve `{id: DatosPublicosUsuario(id, nombre, apellido)}` en una sola consulta, para mostrar al solicitante en `spaces` y `loans` sin importar el modelo `Usuario` (SPEC-03 Fase A). No filtra por sede ni por estado: quien la llama sólo pasa ids que ya puede mostrar, y nunca la usa para exponer identidades en la disponibilidad.
 
+**API pública de `inventory` para otros módulos** (`app/modules/inventory/service.py`, SPEC-04 §6). Ninguna función hace `commit`: la transacción es de quien llama. `unidades_asignables` y `unidad_es_asignable` (unidades `disponible` de la sede, de un ítem activo); `marcar_unidad_prestada`, `liberar_unidad` y `marcar_unidad_mantenimiento` (entrega, devolución y devolución con daño; se pueden encadenar en una transacción); `bloquear_unidad` (`SELECT … FOR UPDATE`; quien llama sólo lee la unidad, y bloquea varias en orden ascendente de id), y `datos_equipamiento_por_ids` (plazo, alta gama y nombre por lote). `inventory/service.py` no importa `loans`: sólo `inventory/disponibilidad.py` usa `loans.ocupacion_de_unidades`.
+
 **Archivos (SPEC-03 Fase B2).** La foto de perfil y el PDF de aval de los pedidos de alta gama (la resolución del Consejo) se guardan en PostgreSQL: metadatos en `archivos` y bytes en `archivos_contenido`. El tipo se decide por los primeros bytes, no por la extensión; la foto se vuelve a codificar como JPEG de hasta 512 px sin metadatos (se pierde la ubicación del EXIF). La descarga responde `404` a quien no tiene permiso: el propietario, los administradores con jurisdicción y el Superadministrador. API pública para `loans` en `app.modules.files.service`: `vincular_archivo` (en la transacción de la orden, sin `commit`), `abrir_archivo` (sin control de acceso: lo hace quien llama) y `respuesta_descarga` (encabezados de seguridad comunes).
 
 ---
@@ -225,6 +227,7 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | | `GET /api/v1/config/sedes` | Horario y correo de contacto de cada sede (cualquier usuario autenticado) |
 | Inventario | `GET/POST /api/v1/inventory/categorias` | Categorías del catálogo |
 | | `GET /api/v1/inventory/equipamiento[/{id}]` | Catálogo con filtros `sede`, `categoria`, `q`. Estudiantes y docentes reciben una vista reducida (sin unidades ni series); `incluir_inactivos` sólo para administradores |
+| | `GET /api/v1/inventory/equipamiento/{id}/disponibilidad?desde=…&hasta=…` | Unidades libres por día (PRE-01, SPEC-04 §5.4): rango de hasta 62 días desde hoy, sólo cantidades; el `SUPERADMIN` indica `sede`. Usa el mismo criterio que `POST /loans/ordenes` |
 | | `POST /api/v1/inventory/equipamiento` | Alta de equipamiento (plazo por defecto desde `prestamo.general.max_dias`, o `prestamo.notebook.max_dias` si `es_notebook`) |
 | | `PATCH /api/v1/inventory/equipamiento/{id}` · `PATCH …/{id}/estado` | Edición y baja o reactivación lógica |
 | | `POST /api/v1/inventory/equipamiento/{id}/unidades` | Alta de unidades físicas (sede automática para `ADMIN_LOCAL`) |

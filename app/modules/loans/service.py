@@ -22,7 +22,7 @@ from app.core.deps import puede_ver_sede, resolver_alcance_sede
 from app.core.enums import RolUsuario, SedeEnum
 from app.core.errors import AppError
 from app.core.settings import ZONA_HORARIA_LAB, ahora_lab
-from app.modules.config.service import obtener_parametro
+from app.modules.config.service import datos_de_sede, obtener_parametro
 from app.modules.files.enums import PropositoArchivo
 from app.modules.files.service import ArchivoContenido, abrir_archivo, vincular_archivo
 from app.modules.inventory.service import (
@@ -57,17 +57,39 @@ async def _entero(db: AsyncSession, clave: str) -> int:
     return valor
 
 
-async def _hora(db: AsyncSession, clave: str) -> time:
-    valor = await obtener_parametro(db, clave)
-    assert isinstance(valor, time), f"{clave} no es una hora"
-    return valor
 
 
-async def reglas(db: AsyncSession) -> ReglasResponse:
-    """Reglas operativas vigentes, para que el formulario las conozca (D-L07)."""
+def sede_de_reglas(actor: Usuario, sede: SedeEnum | None) -> SedeEnum:
+    """Sede cuyas reglas pide ``actor`` en ``GET /reglas`` (AC-L63, EC-57 de SPEC-09).
+
+    - ``SUPERADMIN`` (no tiene sede): la indica con ``?sede=``; si no, ``422 SEDE_REQUERIDA``.
+    - El resto: la suya. Pedir otra responde ``403 SEDE_FUERA_DE_ALCANCE``, como en ``core``.
+    """
+    if actor.rol is RolUsuario.SUPERADMIN:
+        if sede is None:
+            raise AppError(422, "SEDE_REQUERIDA", "Indicá la sede de la que querés ver las reglas.")
+        return sede
+    propia = actor.sede
+    if propia is None:  # no debería pasar: el CHECK sede_segun_rol de usuarios lo impide
+        raise AppError(403, "ROL_NO_AUTORIZADO", "Tu cuenta no tiene una sede asignada.")
+    if sede is not None and sede != propia:
+        raise AppError(
+            403, "SEDE_FUERA_DE_ALCANCE", "No tenés jurisdicción sobre la sede solicitada."
+        )
+    return propia
+
+
+async def reglas(db: AsyncSession, sede: SedeEnum) -> ReglasResponse:
+    """Reglas operativas vigentes de ``sede``, para que el formulario las conozca (D-L07).
+
+    El horario es el de la sede (`config.datos_de_sede`, RN-L04, ADR-022 a); la
+    anticipación y los plazos son comunes a las dos sedes.
+    """
+    horario = await datos_de_sede(db, sede)
     return ReglasResponse(
-        horario_apertura=await _hora(db, "horario.apertura"),
-        horario_cierre=await _hora(db, "horario.cierre"),
+        sede=sede,
+        horario_apertura=horario.horario_apertura,
+        horario_cierre=horario.horario_cierre,
         anticipacion_min_horas=await _entero(db, "solicitud.anticipacion_min_horas"),
         max_dias_general=await _entero(db, "prestamo.general.max_dias"),
         max_dias_notebook=await _entero(db, "prestamo.notebook.max_dias"),
@@ -277,9 +299,8 @@ async def _validar_ajuste_horario(
             "El nuevo horario de retiro tiene que ser posterior a este momento.",
             campo="nuevo_retiro",
         )
-    _validar_franja(
-        retiro, devolucion, await _hora(db, "horario.apertura"), await _hora(db, "horario.cierre")
-    )
+    horario = await datos_de_sede(db, orden.sede)  # el de la sede de la orden (RN-L04)
+    _validar_franja(retiro, devolucion, horario.horario_apertura, horario.horario_cierre)
     max_general = await _entero(db, "prestamo.general.max_dias")
     max_notebook = await _entero(db, "prestamo.notebook.max_dias")
     modelos = list(dict.fromkeys(d.equipamiento_id for d in orden.detalles))
@@ -848,9 +869,9 @@ async def crear_orden(db: AsyncSession, actor: Usuario, payload: OrdenPedidoCrea
         )
     retiro, devolucion = payload.retiro, payload.devolucion
 
-    # 2. Parámetros (RN-L28). Horario global hasta que config publique el de cada sede (K10).
-    apertura = await _hora(db, "horario.apertura")
-    cierre = await _hora(db, "horario.cierre")
+    # 2. Parámetros (RN-L28). El horario es el de la sede del solicitante (RN-L04, ADR-022 a).
+    horario = await datos_de_sede(db, sede)
+    apertura, cierre = horario.horario_apertura, horario.horario_cierre
     anticipacion = await _entero(db, "solicitud.anticipacion_min_horas")
     max_general = await _entero(db, "prestamo.general.max_dias")
     max_notebook = await _entero(db, "prestamo.notebook.max_dias")

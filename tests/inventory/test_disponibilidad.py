@@ -1,4 +1,4 @@
-"""SPEC-04 §5.4 — Disponibilidad por fechas (PRE-01, RN-I14, RN-I15) - INV-26, INV-30."""
+"""SPEC-04 §5.4 — Disponibilidad por fechas (PRE-01, RN-I14, RN-I15) - INV-26, INV-30, INV-31."""
 
 from datetime import datetime, time, timedelta
 
@@ -261,3 +261,41 @@ async def test_el_tope_de_62_dias_es_valido(client, crear_equipo, crear_usuario)
     )
 
     assert r.status_code == 200 and len(r.json()["dias"]) == MAX_DIAS_DISPONIBILIDAD
+
+
+# ── Coherencia con `POST /api/v1/loans/ordenes` (C16) ────────────────────────
+
+ORDENES = "/api/v1/loans/ordenes"
+
+
+def _pedido_de_un_dia(equipamiento_id: int, offset: int) -> dict:
+    """Pedido de `loans` como en `tests/loans/test_crear_orden.py`: de 10:00 a 15:00."""
+    return {
+        "asignatura_id": 7,
+        "retiro": _retiro(offset, 10).isoformat(),
+        "devolucion": _retiro(offset, 15).isoformat(),
+        "items": [{"equipamiento_id": equipamiento_id}],
+        "acepta_normativa": True,
+    }
+
+
+async def test_el_calendario_coincide_con_crear_la_orden(  # INV-31
+    client, crear_equipo, crear_linea, crear_usuario
+):
+    eq = await crear_equipo(unidades=((USH,),))
+    # Reserva aprobada del día +4 (10:00) al +6 (15:00): esos tres días quedan sin unidades.
+    await crear_linea(eq, eq.unidades[0], D.RESERVADO, retiro=_retiro(4))
+    alumno = await crear_usuario(R.ESTUDIANTE, USH)
+
+    r = await client.get(_url(eq.id), params=_rango(5, 10), headers=auth(alumno))
+    assert r.status_code == 200
+    libres = dict(zip(range(5, 11), _libres(r.json())))
+    assert libres[5] == 0 and libres[10] == 1
+
+    # Día sin unidades en el calendario → `loans` rechaza la orden.
+    r = await client.post(ORDENES, json=_pedido_de_un_dia(eq.id, 5), headers=auth(alumno))
+    assert r.status_code == 409 and r.json()["code"] == "EQUIPAMIENTO_NO_DISPONIBLE"
+
+    # Día con una unidad libre → la orden de una línea se crea.
+    r = await client.post(ORDENES, json=_pedido_de_un_dia(eq.id, 10), headers=auth(alumno))
+    assert r.status_code == 201, r.json()
