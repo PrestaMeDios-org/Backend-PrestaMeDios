@@ -232,7 +232,8 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | | `PATCH /api/v1/inventory/equipamiento/{id}` · `PATCH …/{id}/estado` | Edición y baja o reactivación lógica |
 | | `POST /api/v1/inventory/equipamiento/{id}/unidades` | Alta de unidades físicas (sede automática para `ADMIN_LOCAL`) |
 | | `GET /api/v1/inventory/unidades` · `PATCH …/{id}` | Stock de la jurisdicción; edición de serie, código y locker (1–7) |
-| | `PATCH /api/v1/inventory/unidades/{id}/estado` | `disponible` ⇄ `mantenimiento`, y `baja` (definitiva). `prestado` lo gestiona sólo `loans` mediante `app/modules/inventory/service.py` |
+| | `GET /api/v1/inventory/unidades/{id}/historial?limit=&offset=` | Historial de usuarios de la unidad (PRE-12, SPEC-04 §5.5), del más reciente al más antiguo; del solicitante sólo nombre y apellido. Sólo administradores con jurisdicción |
+| | `PATCH /api/v1/inventory/unidades/{id}/estado` | `disponible` ⇄ `mantenimiento`, y `baja` (definitiva). `prestado` lo gestiona sólo `loans` mediante `app/modules/inventory/service.py`. Al pasar a `mantenimiento` o `baja` devuelve `reservas_afectadas` y `ordenes_afectadas` (reservas aprobadas desde ahora, PRE-17) |
 | Espacios | `GET/POST /api/v1/spaces/espacios` | Espacios reservables |
 | | `GET/POST /api/v1/spaces/reservas` · `PATCH …/{id}/estado` | Solicitudes y su ciclo de vida; nombre y apellido del solicitante sólo para administradores (SPEC-08 D-S06) |
 | | `GET/POST /api/v1/spaces/bloqueos` · `POST …/bloqueos/general` · `PATCH …/bloqueos/{id}/estado` | Bloqueos administrativos; el general (sólo SUPERADMIN) abarca ambas sedes y se revierte entero; revertir no borra el registro (SPEC-08 v1.1.0) |

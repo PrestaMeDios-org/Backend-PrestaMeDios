@@ -1,4 +1,4 @@
-"""SPEC-04 · Altas, edición, baja lógica y estados (PRE-12, PRE-14, PRE-19) — INV-09…INV-21."""
+"""SPEC-04 · Altas, edición, baja lógica y estados (PRE-12, PRE-14, PRE-19) — INV-09…INV-21, INV-35."""
 
 import asyncio
 
@@ -311,3 +311,99 @@ async def test_cambios_concurrentes_de_estado(client, db, crear_equipo, crear_us
     for uid in ids:
         assert await _estado(db, uid) == E.BAJA, f"la unidad {uid} perdió la baja (carrera)"
 
+
+
+# ── Reservas afectadas al pasar a mantenimiento o baja (PRE-14, PRE-17) ──────
+
+
+def _retiro_en(offset: int):
+    from datetime import datetime, time
+
+    from app.core.settings import ZONA_HORARIA_LAB
+    from tests.conftest import dia
+
+    return datetime.combine(dia(offset), time(10), tzinfo=ZONA_HORARIA_LAB)
+
+
+async def _unidad_con_reservas(crear_equipo, crear_linea):
+    """Unidad con dos reservas aprobadas futuras y líneas que no cuentan."""
+    from app.modules.loans.enums import EstadoDetalleEnum as D
+
+    eq = await crear_equipo(unidades=((USH,),))
+    unidad = eq.unidades[0]
+    primera = await crear_linea(eq, unidad, D.RESERVADO, retiro=_retiro_en(3))
+    segunda = await crear_linea(eq, unidad, D.RESERVADO, retiro=_retiro_en(8))
+    await crear_linea(eq, unidad, D.PENDIENTE, retiro=_retiro_en(5))  # no aprobada
+    await crear_linea(eq, unidad, D.CANCELADO, retiro=_retiro_en(12))
+    await crear_linea(eq, unidad, D.ENTREGADO, retiro=_retiro_en(15))  # ya empezó
+    await crear_linea(eq, unidad, D.RESERVADO, retiro=_retiro_en(-3))  # retiro vencido
+    return unidad, [primera.id, segunda.id]
+
+
+async def test_mantenimiento_informa_las_reservas_afectadas(  # INV-35
+    client, db, crear_equipo, crear_linea, crear_usuario
+):
+    unidad, ordenes = await _unidad_con_reservas(crear_equipo, crear_linea)
+    admin = await crear_usuario(R.ADMIN_LOCAL, USH)
+    url = f"{B}/unidades/{unidad.id}/estado"
+
+    r = await client.patch(url, json={"estado": "mantenimiento"}, headers=auth(admin))
+    assert r.status_code == 200
+    cuerpo = r.json()
+    assert cuerpo["estado"] == "mantenimiento"
+    assert cuerpo["reservas_afectadas"] == 2 and cuerpo["ordenes_afectadas"] == ordenes
+    assert await _estado(db, unidad.id) == E.MANTENIMIENTO
+
+    # mantenimiento → baja también es un cambio: se vuelven a informar.
+    r = await client.patch(url, json={"estado": "baja"}, headers=auth(admin))
+    assert r.status_code == 200
+    assert r.json()["reservas_afectadas"] == 2 and r.json()["ordenes_afectadas"] == ordenes
+    assert await _estado(db, unidad.id) == E.BAJA
+
+
+async def test_sin_cambio_o_a_disponible_no_informa(  # INV-35
+    client, crear_equipo, crear_linea, crear_usuario
+):
+    unidad, _ = await _unidad_con_reservas(crear_equipo, crear_linea)
+    admin = await crear_usuario(R.ADMIN_LOCAL, USH)
+    url = f"{B}/unidades/{unidad.id}/estado"
+
+    await client.patch(url, json={"estado": "mantenimiento"}, headers=auth(admin))
+    idempotente = await client.patch(url, json={"estado": "mantenimiento"}, headers=auth(admin))
+    rehabilitada = await client.patch(url, json={"estado": "disponible"}, headers=auth(admin))
+    repetida = await client.patch(url, json={"estado": "disponible"}, headers=auth(admin))
+
+    for r in (idempotente, rehabilitada, repetida):
+        assert r.status_code == 200
+        assert r.json()["reservas_afectadas"] is None
+        assert r.json()["ordenes_afectadas"] is None
+    assert rehabilitada.json()["estado"] == "disponible"
+
+
+async def test_unidad_sin_reservas_informa_cero(  # INV-35
+    client, crear_equipo, crear_usuario
+):
+    eq = await crear_equipo(unidades=((USH,),))
+    admin = await crear_usuario(R.ADMIN_LOCAL, USH)
+
+    r = await client.patch(
+        f"{B}/unidades/{eq.unidades[0].id}/estado", json={"estado": "baja"}, headers=auth(admin)
+    )
+
+    assert r.status_code == 200
+    assert r.json()["reservas_afectadas"] == 0 and r.json()["ordenes_afectadas"] == []
+
+
+async def test_reservas_afectadas_no_expone_solicitantes(  # INV-35 (RN-I7, P6)
+    client, crear_equipo, crear_linea, crear_usuario
+):
+    unidad, _ = await _unidad_con_reservas(crear_equipo, crear_linea)
+    admin = await crear_usuario(R.ADMIN_LOCAL, USH)
+
+    r = await client.patch(
+        f"{B}/unidades/{unidad.id}/estado", json={"estado": "mantenimiento"}, headers=auth(admin)
+    )
+
+    texto = r.text.lower()
+    for clave in ("solicitante", "nombre", "apellido", "dni", "email"):
+        assert clave not in texto
