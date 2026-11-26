@@ -68,8 +68,10 @@ cat <<EOF
      PermitRootLogin no) y una clave por operador (§6.10).
   3. Completar $ENV (secretos del gestor de contraseñas; permisos 600).
   4. Como ${USUARIO}:  cd $RAIZ/Backend-PrestaMeDios
-       docker compose -f compose.prod.yaml up -d --build
+       docker compose -f compose.prod.yaml build
+       docker compose -f compose.prod.yaml up -d db
        docker compose -f compose.prod.yaml run --rm api alembic upgrade head
+       docker compose -f compose.prod.yaml up -d
        docker compose -f compose.prod.yaml exec api python -m app.modules.users.cli crear-superadmin --email … --nombre … --apellido … --dni … --telefono …
   5. Cloudflare: hostname público del túnel → http://web:80. Monitoreo de /health/db y latidos.
 EOF
