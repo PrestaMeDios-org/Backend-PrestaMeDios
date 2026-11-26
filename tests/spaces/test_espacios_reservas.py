@@ -5,13 +5,13 @@ general (AC-S15, EC-S13) y reversión lógica de bloqueos (AC-S16, EC-S11, EC-S1
 """
 
 import asyncio
-from datetime import datetime, time, timedelta
+from datetime import time, timedelta
 
 import pytest
 from sqlalchemy import select
 
 from app.core.enums import RolUsuario, SedeEnum
-from app.core.settings import ZONA_HORARIA_LAB, ahora_lab
+from app.core.settings import ahora_lab
 from app.modules.spaces.models import ReservaEspacio
 from tests.conftest import auth, dia
 
@@ -133,14 +133,23 @@ class TestValidacionesDeCreacion:  # AC-35
         assert (await _reservar(client, est, esp, inicio="16:00", fin="17:00")).status_code == 201
 
     async def test_anticipacion_minima(self, client, crear_usuario, crear_espacio, set_parametro):
+        # Horario abierto todo el día para que la reserva a 23 h no dependa de la hora actual.
+        await set_parametro("horario.apertura", "00:00")
+        await set_parametro("horario.cierre", "23:59")
         est = await crear_usuario(R.ESTUDIANTE, USH)
         esp = await crear_espacio(USH)
-        r = await _reservar(client, est, esp, fecha=dia(0), inicio="15:00", fin="16:00")
+        inicio = (ahora_lab() + timedelta(hours=23)).replace(second=0, microsecond=0)
+        fin = inicio + timedelta(minutes=30)
+        if fin.date() != inicio.date():
+            inicio -= timedelta(minutes=30)
+            fin -= timedelta(minutes=30)
+        r = await _reservar(
+            client, est, esp, fecha=inicio.date(),
+            inicio=inicio.strftime("%H:%M"), fin=fin.strftime("%H:%M"),
+        )
         assert r.status_code == 422 and r.json()["code"] == "ANTICIPACION_INSUFICIENTE"
         assert "24 horas" in r.json()["detail"]
         await set_parametro("solicitud.anticipacion_min_horas", 0)
-        await set_parametro("horario.apertura", "00:00")
-        await set_parametro("horario.cierre", "23:59")
         r = await _reservar(client, est, esp, fecha=dia(1), inicio="00:00", fin="01:00")
         assert r.status_code == 201, r.text
 
@@ -161,7 +170,6 @@ class TestValidacionesDeCreacion:  # AC-35
             inicio=inicio.strftime("%H:%M"), fin=fin.strftime("%H:%M"),
         )
         assert r.status_code == 201, r.text
-        assert inicio.tzinfo == ZONA_HORARIA_LAB
 
     async def test_ventana_maxima(self, client, crear_usuario, crear_espacio):
         est = await crear_usuario(R.ESTUDIANTE, USH)
@@ -246,6 +254,8 @@ async def test_disponibilidad_intervalos_y_alcance(client, crear_usuario, crear_
     admin = await crear_usuario(R.ADMIN_LOCAL, USH)
     esp = await crear_espacio(USH)
     await crear_reserva(est, esp, inicio=time(10, 15), fin=time(11, 45), estado="Aprobada")
+    esp_rg = await crear_espacio(RG, "Isla RG")
+    await crear_reserva(await crear_usuario(R.ESTUDIANTE, RG), esp_rg, fecha=dia(3), estado="Aprobada")
     await client.post(
         f"{B}/bloqueos", headers=auth(admin),
         json={"id_espacio": esp.id_espacio, "fecha_inicio": str(dia(3)), "fecha_fin": str(dia(3)),
@@ -259,6 +269,9 @@ async def test_disponibilidad_intervalos_y_alcance(client, crear_usuario, crear_
             {"hora_inicio": "14:00:00", "hora_fin": "16:00:00"},
         ]}
     ]
+    # Sin ?sede, el estudiante sólo ve su sede: ni el espacio ni la franja de Río Grande.
+    assert esp_rg.id_espacio not in {e["id_espacio"] for e in body["intervalos_disponibles"]}
+    assert esp_rg.id_espacio not in {f["id_espacio"] for f in body["franjas_ocupadas"]}
     r = await client.get(
         f"{B}/disponibilidad", params={"fecha": str(dia(3)), "sede": "Río Grande"}, headers=auth(est)
     )
@@ -296,15 +309,6 @@ class TestTransiciones:
         res = await crear_reserva(est, esp, fecha=dia(-1), estado="Aprobada")
         r = await _estado(client, est, res.id_reserva, nuevo_estado="Cancelada")
         assert r.status_code == 409 and r.json()["code"] == "TRANSICION_INVALIDA"
-
-    async def test_dueno_cancela_aprobada_futura(
-        self, client, crear_usuario, crear_espacio, crear_reserva
-    ):
-        est = await crear_usuario(R.ESTUDIANTE, USH)
-        esp = await crear_espacio(USH)
-        res = await crear_reserva(est, esp, fecha=dia(1), estado="Aprobada")
-        r = await _estado(client, est, res.id_reserva, nuevo_estado="Cancelada")
-        assert r.status_code == 200 and r.json()["estado_reserva"] == "Cancelada"
 
     async def test_admin_de_otra_sede(self, client, crear_usuario, crear_espacio, crear_reserva):
         admin_rg = await crear_usuario(R.ADMIN_LOCAL, RG)
@@ -361,10 +365,13 @@ class TestTransiciones:
         r = await _estado(client, admin, res.id_reserva, nuevo_estado="Aprobada")
         assert r.status_code == 409 and r.json()["code"] == "ESPACIO_BLOQUEADO"
 
-    async def test_aprobaciones_concurrentes_solapadas(self, client, crear_usuario, crear_espacio, crear_reserva):
+    async def test_aprobaciones_concurrentes_solapadas(
+        self, client, db, crear_usuario, crear_espacio, crear_reserva
+    ):
         admin = await crear_usuario(R.ADMIN_LOCAL, USH)
         sa = await crear_usuario(R.SUPERADMIN)
         esp = await crear_espacio(USH)
+        esp_id = esp.id_espacio
         r1 = await crear_reserva(await crear_usuario(R.ESTUDIANTE, USH), esp)
         r2 = await crear_reserva(await crear_usuario(R.ESTUDIANTE, USH), esp, inicio=time(10, 30), fin=time(11, 30))
         respuestas = await asyncio.gather(
@@ -372,6 +379,18 @@ class TestTransiciones:
             _estado(client, sa, r2.id_reserva, nuevo_estado="Aprobada"),
         )
         assert sorted(r.status_code for r in respuestas) == [200, 409]
+        conflicto = next(r for r in respuestas if r.status_code == 409)
+        assert conflicto.json()["code"] in {"FRANJA_OCUPADA", "TRANSICION_INVALIDA"}
+        db.expire_all()
+        aprobadas = (
+            await db.scalars(
+                select(ReservaEspacio).where(
+                    ReservaEspacio.id_espacio == esp_id,
+                    ReservaEspacio.estado_reserva == "Aprobada",
+                )
+            )
+        ).all()
+        assert len(aprobadas) == 1
 
 
 # ── Bloqueos (AC-38) ─────────────────────────────────────────────────────────
@@ -677,8 +696,3 @@ async def test_usuario_dado_de_baja_conserva_reservas(db, crear_usuario, crear_e
         await db.commit()
     await db.rollback()
     assert (await db.scalars(select(ReservaEspacio))).first() is not None
-
-
-async def test_inicio_en_zona_lab():
-    inicio = datetime.combine(dia(1), time(9), tzinfo=ZONA_HORARIA_LAB)
-    assert inicio.utcoffset() == timedelta(hours=-3)

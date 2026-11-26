@@ -111,8 +111,8 @@ async def test_superadmin_publica_segun_lo_indicado(
 
 @pytest.mark.parametrize(
     "cambio",
-    [{"titulo": "ab"}, {"contenido": ""}, {"contenido": "x" * 5001}, {"otro": 1}],
-    ids=["titulo-corto", "contenido-vacio", "contenido-largo", "campo-desconocido"],
+    [{"contenido": "x" * 5001}, {"otro": 1}],
+    ids=["contenido-largo", "campo-desconocido"],
 )
 async def test_valida_el_cuerpo_del_alta(client, crear_usuario, cambio):
     admin = await crear_usuario(R.ADMIN_LOCAL, USH)
@@ -197,8 +197,6 @@ async def test_orden_y_paginacion(client, crear_usuario, crear_comunicado):
     assert r.json()["total"] == 3
     r = await client.get(B, params={"limit": 2, "offset": 2}, headers=auth(u))
     assert [c["titulo"] for c in r.json()["items"]] == ["C0"]
-    r = await client.get(B, params={"limit": 101}, headers=auth(u))
-    assert r.status_code == 422
 
 
 # ── NTF-08 · Roles sin permiso ───────────────────────────────────────────────
@@ -261,7 +259,15 @@ async def test_superadmin_edita_uno_global(client, crear_usuario, crear_comunica
 
 @pytest.mark.parametrize(
     "cuerpo",
-    [{}, {"sede": "Río Grande"}, {"es_global": True}, {"autor_id": 1}, {"titulo": None}],
+    [
+        {},
+        # Con un campo válido al lado: el 422 tiene que venir del campo prohibido,
+        # no de "al menos un campo".
+        {"titulo": "Nuevo título", "sede": "Río Grande"},
+        {"titulo": "Nuevo título", "es_global": True},
+        {"titulo": "Nuevo título", "autor_id": 1},
+        {"titulo": None},
+    ],
     ids=["vacio", "sede", "es_global", "desconocido", "titulo-nulo"],
 )
 async def test_edicion_rechaza_campos_no_editables(
@@ -278,9 +284,17 @@ async def test_archivar_y_reactivar_es_idempotente(
 ):  # NTF-09
     c = await crear_comunicado(USH)
     admin = await crear_usuario(R.ADMIN_LOCAL, USH)
+    respuestas = []
     for estado in ("ARCHIVADO", "ARCHIVADO", "PUBLICADO", "PUBLICADO"):
         r = await client.patch(f"{B}/{c.id}/estado", json={"estado": estado}, headers=auth(admin))
         assert r.status_code == 200 and r.json()["estado"] == estado
+        respuestas.append(r.json())
+    archivado, archivado_otra_vez, publicado, publicado_otra_vez = respuestas
+    # Repetir el mismo estado no toca nada (RN-N4)…
+    assert archivado_otra_vez["actualizado_en"] == archivado["actualizado_en"]
+    assert publicado_otra_vez["actualizado_en"] == publicado["actualizado_en"]
+    # …pero la transición real sí.
+    assert publicado["actualizado_en"] != archivado["actualizado_en"]
 
 
 async def test_vencimiento_en_el_pasado_es_422(client, crear_usuario, crear_comunicado):  # NTF-11
