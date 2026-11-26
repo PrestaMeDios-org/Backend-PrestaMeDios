@@ -1,14 +1,20 @@
 """Migración `0019_inventory_categorias_base` (PRE-01, PRE-14; pedido del Perfil 2).
 
-Como en `tests/loans/test_migracion_0016.py`: se verifican las operaciones sin base de
-datos. El ciclo upgrade → downgrade → upgrade contra PostgreSQL se valida aparte, y la
-prueba de que Alembic tiene una sola cabeza está en `tests/loans/test_migracion_0011.py`.
+Migración de datos: se corre de verdad sobre la base de tests con un ``Operations``
+de Alembic ligado a la conexión de la sesión, como ``tests/config/test_migracion_0017.py``.
+La cadena y el ciclo de esquema los verifica ``tests/test_migraciones.py``.
 """
 
 import importlib.util
-import re
 from pathlib import Path
-from unittest.mock import Mock
+
+import pytest
+from alembic.operations import Operations
+from alembic.runtime.migration import MigrationContext
+from sqlalchemy import select
+
+from app.modules.inventory.models import Categoria
+from app.modules.inventory.schemas import CategoriaCreate
 
 RUTA = Path(__file__).parents[2] / "alembic" / "versions" / "0019_inventory_categorias_base.py"
 
@@ -20,41 +26,54 @@ def _cargar():
     return modulo
 
 
-def _ejecutadas(migracion, paso, monkeypatch):
-    op = Mock()
-    monkeypatch.setattr(migracion, "op", op)
-    getattr(migracion, paso)()
-    return [c.args[0] for c in op.execute.call_args_list]
+M = _cargar()
+IDS = {id_ for id_, _, _ in M.CATEGORIAS}
 
 
-def test_encadena_con_la_0017():
-    migracion = _cargar()
-    assert migracion.revision == "0019_inventory_categorias_base"
-    assert migracion.down_revision == "0017_config_sedes"
+async def _correr(db, paso: str) -> None:
+    def _sync(conn) -> None:
+        M.op = Operations(MigrationContext.configure(conn))
+        getattr(M, paso)()
+
+    conn = await db.connection()
+    await conn.run_sync(_sync)
+    await db.commit()
+    db.expire_all()
 
 
-def test_son_las_cinco_categorias_de_la_demo():
-    migracion = _cargar()
-    assert [nombre for _, nombre, _ in migracion.CATEGORIAS] == [
-        "Audio", "Cámaras", "Iluminación", "Notebooks", "Trípodes",
-    ]
-    for id_, _, color in migracion.CATEGORIAS:
-        assert re.fullmatch(r"[a-z0-9-]+", id_)  # el mismo patrón que CategoriaCreate
-        assert re.fullmatch(r"#[0-9A-F]{6}", color)
+async def _categorias(db) -> dict[str, str]:
+    return {c.id: c.nombre for c in (await db.scalars(select(Categoria))).all()}
 
 
-def test_upgrade_no_duplica_ni_pisa(monkeypatch):
-    migracion = _cargar()
-    sentencias = _ejecutadas(migracion, "upgrade", monkeypatch)
-    assert len(sentencias) == 5
-    assert all("ON CONFLICT DO NOTHING" in str(s) for s in sentencias)
-    assert [s.compile().params["id"] for s in sentencias] == [
-        "audio", "cameras", "lighting", "notebooks", "tripods",
-    ]
+@pytest.mark.parametrize(("id_", "nombre", "color"), M.CATEGORIAS, ids=[c[0] for c in M.CATEGORIAS])
+def test_cada_categoria_se_puede_crear_por_la_api(id_, nombre, color):
+    # Las mismas reglas que `POST /categorias`: si no, la categoría base no se podría editar.
+    CategoriaCreate(id=id_, nombre=nombre, color=color)
 
 
-def test_downgrade_no_borra_categorias_en_uso(monkeypatch):
-    migracion = _cargar()
-    sentencias = _ejecutadas(migracion, "downgrade", monkeypatch)
-    assert len(sentencias) == 5
-    assert all("NOT EXISTS" in str(s) and "equipamientos" in str(s) for s in sentencias)
+@pytest.mark.integracion
+async def test_upgrade_no_duplica_ni_pisa(db):
+    db.add(Categoria(id="audio", nombre="Sonido"))  # el administrador la renombró
+    db.add(Categoria(id="camaras-viejas", nombre="Cámaras"))  # mismo nombre, otro id
+    await db.commit()
+
+    await _correr(db, "upgrade")
+    await _correr(db, "upgrade")  # idempotente
+
+    categorias = await _categorias(db)
+    assert categorias["audio"] == "Sonido"
+    assert "cameras" not in categorias
+    assert {"lighting", "notebooks", "tripods"} <= set(categorias)
+    assert len(categorias) == 5
+
+
+@pytest.mark.integracion
+async def test_downgrade_no_borra_categorias_en_uso_ni_cambiadas(db, crear_equipo):
+    await _correr(db, "upgrade")
+    await crear_equipo(categoria="audio")
+    (await db.get(Categoria, "cameras")).nombre = "Cámaras de cine"
+    await db.commit()
+
+    await _correr(db, "downgrade")
+
+    assert set(await _categorias(db)) == {"audio", "cameras"}
