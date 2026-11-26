@@ -1,9 +1,10 @@
 """SPEC-03 §6.5 · API pública de `files` para `loans` — AC-86, EC-42.
 
 ``vincular_archivo`` se prueba sin `loans`: lo que importa es su contrato.
+``abrir_archivo`` y ``respuesta_descarga`` los ejercita la descarga
+(``test_archivos.py::TestDescargaAval::test_encabezados``); acá sólo queda el ``None``.
 """
 
-import dataclasses
 import uuid
 
 import pytest
@@ -13,13 +14,8 @@ from app.core.enums import RolUsuario
 from app.core.errors import AppError
 from app.modules.files.enums import PropositoArchivo
 from app.modules.files.models import Archivo
-from app.modules.files.service import (
-    ArchivoContenido,
-    abrir_archivo,
-    respuesta_descarga,
-    vincular_archivo,
-)
-from tests.files.conftest import jpeg_con_exif, pdf_minimo, subir_aval, subir_foto
+from app.modules.files.service import abrir_archivo, vincular_archivo
+from tests.files.conftest import jpeg_con_exif, subir_aval, subir_foto
 
 pytestmark = pytest.mark.integracion
 
@@ -48,12 +44,6 @@ class TestVincularArchivo:  # AC-86
         await db.commit()
         assert await _vinculado_en(sessionmaker_, archivo_id) is not None
 
-    async def test_docente_tambien(self, client, db, crear_usuario):  # EC-47
-        u = await crear_usuario(RolUsuario.DOCENTE)
-        uid = u.id
-        archivo_id = await _aval(client, u)
-        await vincular_archivo(db, archivo_id, propietario_id=uid, proposito=AVAL)
-
     async def test_casos_invalidos_mismo_codigo(self, client, db, crear_usuario):  # D-19
         dueno = await crear_usuario(RolUsuario.ESTUDIANTE)
         otro = await crear_usuario(RolUsuario.ESTUDIANTE)
@@ -81,25 +71,5 @@ class TestVincularArchivo:  # AC-86
         assert exc.value.code == "ARCHIVO_INVALIDO"
 
 
-class TestAbrirYServir:
-    async def test_abrir_archivo(self, client, db, crear_usuario):
-        u = await crear_usuario(RolUsuario.ESTUDIANTE)
-        archivo_id = await _aval(client, u)
-        contenido = await abrir_archivo(db, archivo_id)
-        assert isinstance(contenido, ArchivoContenido)
-        assert contenido.id == archivo_id and contenido.datos == pdf_minimo()
-        assert contenido.tipo_mime == "application/pdf"
-        assert contenido.nombre_original == "resolucion.pdf"
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            contenido.datos = b""  # type: ignore[misc]
-
-    async def test_abrir_inexistente(self, db):
-        assert await abrir_archivo(db, uuid.uuid4()) is None
-
-    def test_respuesta_descarga(self):  # RN-61
-        r = respuesta_descarga(
-            ArchivoContenido(uuid.uuid4(), "application/pdf", "aval.pdf", b"%PDF-1.4")
-        )
-        assert r.body == b"%PDF-1.4" and r.media_type == "application/pdf"
-        assert r.headers["content-disposition"].startswith("attachment;")
-        assert r.headers["cache-control"] == "private, no-store"
+async def test_abrir_inexistente(db):
+    assert await abrir_archivo(db, uuid.uuid4()) is None

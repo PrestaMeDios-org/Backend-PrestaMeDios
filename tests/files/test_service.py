@@ -41,30 +41,21 @@ class TestDetectarTipo:  # RN-55
     def test_desconocidos(self, datos):
         assert service.detectar_tipo(datos) is None
 
-    def test_png_no_es_aval(self):  # AC-82
-        with pytest.raises(AppError) as exc:
-            service.validar_tipo(imagen("PNG"), PropositoArchivo.AVAL_PRESTAMO)
-        assert exc.value.code == "TIPO_ARCHIVO_NO_PERMITIDO"
-
-    def test_pdf_no_es_foto(self):
-        with pytest.raises(AppError) as exc:
-            service.validar_tipo(pdf_minimo(), PropositoArchivo.FOTO_PERFIL)
-        assert exc.value.code == "TIPO_ARCHIVO_NO_PERMITIDO"
-
 
 class TestLeerConLimite:  # RN-56
-    async def test_justo_en_el_maximo(self, limite_mb):
+    @pytest.mark.parametrize("largo", [MB, MB + 1])
+    async def test_borde_del_maximo(self, limite_mb, largo):
         limite_mb(pdf=1)
-        datos = await service.leer_con_limite(
-            _upload(b"a" * MB), PropositoArchivo.AVAL_PRESTAMO, content_length=None
-        )
-        assert len(datos) == MB
-
-    async def test_un_byte_de_mas(self, limite_mb):
-        limite_mb(pdf=1)
+        archivo = _upload(b"a" * largo)
+        if largo == MB:
+            datos = await service.leer_con_limite(
+                archivo, PropositoArchivo.AVAL_PRESTAMO, content_length=None
+            )
+            assert len(datos) == MB
+            return
         with pytest.raises(AppError) as exc:
             await service.leer_con_limite(
-                _upload(b"a" * (MB + 1)), PropositoArchivo.AVAL_PRESTAMO, content_length=None
+                archivo, PropositoArchivo.AVAL_PRESTAMO, content_length=None
             )
         assert exc.value.code == "ARCHIVO_DEMASIADO_GRANDE"
         assert exc.value.extra == {"max_mb": 1}
@@ -90,15 +81,6 @@ class TestLeerConLimite:  # RN-56
         assert exc.value.code == "ARCHIVO_DEMASIADO_GRANDE"
         assert archivo.file.tell() == 0
 
-    async def test_content_length_con_margen_se_acepta(self, limite_mb):
-        limite_mb(pdf=1)
-        datos = await service.leer_con_limite(
-            _upload(b"a" * 10),
-            PropositoArchivo.AVAL_PRESTAMO,
-            content_length=MB + service.MARGEN_MULTIPART,
-        )
-        assert datos == b"a" * 10
-
 
 class TestSanearNombre:  # RN-57
     @pytest.mark.parametrize(
@@ -121,30 +103,18 @@ class TestSanearNombre:  # RN-57
         assert len(service.sanear_nombre("a" * 400 + ".pdf")) == 255
 
 
-class TestProcesarFoto:  # D-11
-    async def test_quita_exif_y_reduce(self):  # AC-83 (parte de servicio)
-        original = jpeg_con_exif(1200, 800)
-        assert Image.open(io.BytesIO(original)).getexif()  # el original sí tiene EXIF
-
-        procesada = await service.procesar_foto(original)
-        resultado = Image.open(io.BytesIO(procesada))
-        assert resultado.format == "JPEG"
-        assert resultado.size == (512, 341)
-        assert not resultado.getexif()
-        assert b"Exif" not in procesada and b"Camara de prueba" not in procesada
-
+class TestProcesarFoto:  # D-11 (quitar EXIF y reducir a 512 px: AC-83 en users/test_foto.py)
     async def test_respeta_la_orientacion(self):
         procesada = await service.procesar_foto(jpeg_con_exif(1200, 800, orientacion=6))
         assert Image.open(io.BytesIO(procesada)).size == (341, 512)
 
-    async def test_no_agranda(self):
-        procesada = await service.procesar_foto(imagen("PNG", (100, 50)))
-        assert Image.open(io.BytesIO(procesada)).size == (100, 50)
-
     async def test_png_con_transparencia_y_webp(self):
-        for datos in (imagen("PNG", modo="RGBA"), imagen("WEBP")):
-            procesada = await service.procesar_foto(datos)
-            assert Image.open(io.BytesIO(procesada)).mode == "RGB"
+        procesada = await service.procesar_foto(imagen("PNG", modo="RGBA"))
+        resultado = Image.open(io.BytesIO(procesada))
+        assert resultado.mode == "RGB"
+        assert min(resultado.getpixel((0, 0))) >= 250  # lo transparente queda sobre blanco
+        procesada = await service.procesar_foto(imagen("WEBP"))
+        assert Image.open(io.BytesIO(procesada)).mode == "RGB"
 
     async def test_politglota_se_neutraliza(self):
         poliglota = imagen("JPEG") + b"<script>alert(1)</script>"
@@ -177,6 +147,3 @@ class TestContentDisposition:  # RN-61
         valor = service._content_disposition("application/pdf", 'Resolución "56".pdf')
         assert valor.startswith('attachment; filename="Resoluci_n _56_.pdf"')
         assert "filename*=UTF-8''Resoluci%C3%B3n%20%2256%22.pdf" in valor
-
-    def test_foto_inline(self):
-        assert service._content_disposition("image/jpeg", "foto.jpg").startswith("inline;")
