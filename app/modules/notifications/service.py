@@ -3,6 +3,8 @@
 Este archivo tiene dos partes:
 
 - **Interna** (comunicados, Fase A): la usan sólo los endpoints de este módulo.
+  Excepción: ``filtro_lectura`` y ``bloquear_para_editar`` son públicas para que
+  ``portada.py`` (SPEC-10 M-02) aplique exactamente las mismas reglas (SPEC-10 U4).
 - **Pública** (``crear_notificacion``, Fase B, §6): se agrega en la Fase B y es
   la única parte que otros módulos pueden importar.
 
@@ -81,10 +83,13 @@ def _vigente(ahora: datetime) -> ColumnElement[bool]:
     )
 
 
-def _filtro_lectura(
+def filtro_lectura(
     usuario: Usuario, sedes: Sequence[SedeEnum], incluir_archivados: bool, ahora: datetime
 ) -> list[ColumnElement[bool]]:
-    """Condiciones de lectura (RN-N3): sedes del alcance más los globales."""
+    """Condiciones de lectura de comunicados (RN-N3): sedes del alcance más los globales.
+
+    Pública: la usa también ``portada.py`` (SPEC-10 M-02, U4).
+    """
     condiciones: list[ColumnElement[bool]] = [
         or_(Comunicado.sede.in_(sedes), Comunicado.es_global.is_(True))
     ]
@@ -109,7 +114,7 @@ async def listar_comunicados(
 ) -> tuple[list[Comunicado], int]:
     """Comunicados visibles para ``usuario``, del más nuevo al más viejo (NOV-02)."""
     sedes = resolver_alcance_sede(usuario, sede)
-    condiciones = _filtro_lectura(usuario, sedes, incluir_archivados, ahora_lab())
+    condiciones = filtro_lectura(usuario, sedes, incluir_archivados, ahora_lab())
     total = await db.scalar(select(func.count()).select_from(Comunicado).where(*condiciones))
     filas = await db.scalars(
         select(Comunicado)
@@ -127,7 +132,7 @@ async def obtener_comunicado(db: AsyncSession, usuario: Usuario, comunicado_id: 
     comunicado = await db.scalar(
         select(Comunicado).where(
             Comunicado.id == comunicado_id,
-            *_filtro_lectura(usuario, sedes, incluir_archivados=True, ahora=ahora_lab()),
+            *filtro_lectura(usuario, sedes, incluir_archivados=True, ahora=ahora_lab()),
         )
     )
     if comunicado is None:
@@ -135,12 +140,14 @@ async def obtener_comunicado(db: AsyncSession, usuario: Usuario, comunicado_id: 
     return comunicado
 
 
-async def _bloquear_para_editar(
+async def bloquear_para_editar(
     db: AsyncSession, usuario: Usuario, comunicado_id: int
 ) -> Comunicado:
     """Carga con ``FOR UPDATE`` un comunicado que ``usuario`` puede editar (RN-N5).
 
     Un ``ADMIN_LOCAL`` edita los de su sede (de cualquier autor), nunca los globales.
+    Fuera de alcance o inexistente → ``404`` (P4.5). Pública: la usa también
+    ``portada.py`` (SPEC-10 M-02, U4).
     """
     condiciones: list[ColumnElement[bool]] = [Comunicado.id == comunicado_id]
     if usuario.rol != RolUsuario.SUPERADMIN:
@@ -185,7 +192,7 @@ async def editar_comunicado(
     db: AsyncSession, usuario: Usuario, comunicado_id: int, datos: ComunicadoUpdate
 ) -> Comunicado:
     """Edita título, contenido y vencimiento (RN-N5). No hace ``commit``."""
-    comunicado = await _bloquear_para_editar(db, usuario, comunicado_id)
+    comunicado = await bloquear_para_editar(db, usuario, comunicado_id)
     ahora = ahora_lab()
     cambios = datos.model_dump(exclude_unset=True)
     if "vence_en" in cambios:
@@ -200,7 +207,7 @@ async def cambiar_estado_comunicado(
     db: AsyncSession, usuario: Usuario, comunicado_id: int, estado: EstadoComunicado
 ) -> Comunicado:
     """Archiva o reactiva (RN-N4). Mismo estado → sin cambios (idempotente)."""
-    comunicado = await _bloquear_para_editar(db, usuario, comunicado_id)
+    comunicado = await bloquear_para_editar(db, usuario, comunicado_id)
     if comunicado.estado != estado:
         comunicado.estado = estado
         comunicado.actualizado_en = ahora_lab()
