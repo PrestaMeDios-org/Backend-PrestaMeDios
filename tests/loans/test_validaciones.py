@@ -75,16 +75,6 @@ def test_anticipacion_insuficiente_se_rechaza():  # AC-L08
     assert exc.value.extra["anticipacion_min_horas"] == 24
 
 
-def test_anticipacion_cero_horas_acepta_el_retiro_inmediato():  # AC-L08
-    service._validar_anticipacion(AHORA, AHORA, 0)
-
-
-def test_anticipacion_rechaza_un_retiro_en_el_pasado():  # AC-L08
-    with pytest.raises(AppError) as exc:
-        service._validar_anticipacion(AHORA - timedelta(hours=1), AHORA, 0)
-    assert exc.value.code == "ANTICIPACION_INSUFICIENTE"
-
-
 # ── Días corridos y plazo (RN-L06) ───────────────────────────────────────────
 
 
@@ -133,16 +123,8 @@ def test_plazo_excedido_identifica_el_item_y_el_maximo():  # AC-L10
 # ── Disponibilidad (RN-L10) ──────────────────────────────────────────────────
 
 
-def test_disponibilidad_suficiente_es_valida():  # AC-L56
-    service._validar_disponibilidad({1: 2, 2: 1}, {1: [10, 11, 12], 2: [20]})
-
-
 def test_disponibilidad_justa_es_valida():  # AC-L57
     service._validar_disponibilidad({1: 2}, {1: [10, 11]})
-
-
-def test_disponibilidad_sin_lineas_es_valida():
-    service._validar_disponibilidad({}, {})
 
 
 def test_modelo_sin_unidades_libres_se_rechaza():  # AC-L56

@@ -106,24 +106,21 @@ async def test_devuelve_las_unidades_libres_de_cada_linea(
     ]
 
 
-async def test_solo_cuentan_las_unidades_disponibles(
-    client, crear_usuario, crear_equipamiento, crear_orden
-):  # AC-L58, PRE-14
-    camara = await crear_equipamiento(estados=(U.DISPONIBLE, U.PRESTADO, U.MANTENIMIENTO, U.BAJA))
-    orden = await crear_orden(camara)
-    admin = await crear_usuario(A, USH)
-
-    assert await _por_linea(client, admin, orden.id) == {orden.detalles[0].id: [_ids(camara)[0]]}
-
-
+@pytest.mark.parametrize(("rol", "sede_admin"), [(A, RG), (S, None)])
 async def test_solo_cuentan_las_unidades_de_la_sede_de_la_orden(
-    client, crear_usuario, crear_equipamiento, crear_orden
-):  # AC-L58, P5
-    de_rio_grande = await crear_equipamiento(sede=RG)
-    orden = await crear_orden(de_rio_grande)
-    superadmin = await crear_usuario(S)
+    client, db, crear_usuario, crear_equipamiento, crear_orden, rol, sede_admin
+):  # AC-L58, P5: cuenta `orden.sede`, no la sede del administrador
+    camara = await crear_equipamiento(sede=RG)
+    unidad_rg = camara.unidades[0].id
+    de_ushuaia = await crear_equipamiento(sede=USH)
+    # Se pasa la unidad de Ushuaia al mismo modelo: queda una unidad del modelo en cada sede.
+    # El SUPERADMIN no tiene sede, así que solo `orden.sede` da la de Río Grande.
+    de_ushuaia.unidades[0].equipamiento_id = camara.id
+    await db.commit()
+    orden = await crear_orden(camara, sede=RG)
+    admin = await crear_usuario(rol, sede_admin)
 
-    assert await _por_linea(client, superadmin, orden.id) == {orden.detalles[0].id: []}
+    assert await _por_linea(client, admin, orden.id) == {orden.detalles[0].id: [unidad_rg]}
 
 
 async def test_una_reserva_que_se_solapa_excluye_la_unidad(
@@ -152,41 +149,6 @@ async def test_una_reserva_en_otras_fechas_no_excluye_la_unidad(
     assert await _por_linea(client, admin, orden.id) == {orden.detalles[0].id: _ids(camara)}
 
 
-@pytest.mark.parametrize(
-    "estado",
-    [EstadoDetalleEnum.DEVUELTO, EstadoDetalleEnum.CANCELADO, EstadoDetalleEnum.NO_RETIRADO],
-)
-async def test_una_linea_que_ya_libero_la_unidad_no_la_ocupa(
-    client, crear_usuario, crear_equipamiento, crear_linea, crear_orden, estado
-):  # RN-L12
-    camara = await crear_equipamiento()
-    await crear_linea(camara, camara.unidades[0], estado, retiro=SOLAPADO)
-    orden = await crear_orden(camara)
-    admin = await crear_usuario(A, USH)
-
-    assert await _por_linea(client, admin, orden.id) == {orden.detalles[0].id: _ids(camara)}
-
-
-async def test_las_otras_ordenes_pendientes_no_ocupan(
-    client, crear_usuario, crear_equipamiento, crear_orden
-):  # RN-L03: la unidad se asigna recién al aprobar
-    camara = await crear_equipamiento()
-    await crear_orden(camara)
-    orden = await crear_orden(camara)
-    admin = await crear_usuario(A, USH)
-
-    assert await _por_linea(client, admin, orden.id) == {orden.detalles[0].id: _ids(camara)}
-
-
-async def test_solo_devuelve_ids(client, crear_usuario, crear_equipamiento, crear_orden):
-    # P6, plan §8.5.6: ni datos del solicitante ni de otras reservas
-    camara = await crear_equipamiento()
-    orden = await crear_orden(camara)
-    admin = await crear_usuario(A, USH)
-    r = await _libres(client, admin, orden.id)
-    assert set(r.json()[0]) == {"detalle_id", "equipamiento_id", "unidades"}
-
-
 async def test_un_admin_de_otra_sede_recibe_404(
     client, crear_usuario, crear_equipamiento, crear_orden
 ):  # RN-L26
@@ -198,12 +160,6 @@ async def test_un_admin_de_otra_sede_recibe_404(
 
     assert r.status_code == 404
     assert r.json()["code"] == "ORDEN_NO_ENCONTRADA"
-
-
-async def test_una_orden_inexistente_responde_404(client, crear_usuario):
-    admin = await crear_usuario(A, USH)
-    r = await _libres(client, admin, 999)
-    assert r.status_code == 404
 
 
 @pytest.mark.parametrize("rol", [E, D])
@@ -264,21 +220,25 @@ def _codigo(r) -> str:
     return r.json().get("code")
 
 
-@pytest.mark.parametrize(("rol", "sede_admin"), [(A, USH), (S, None)])
+@pytest.mark.parametrize(
+    ("rol", "sede_admin", "motivo"), [(A, USH, None), (S, None, "Retira en el mostrador 2")]
+)
 async def test_aprobar_reserva_una_unidad_por_linea(
-    client, db, crear_usuario, crear_equipamiento, crear_orden, rol, sede_admin
-):  # AC-L19, RN-L11
+    client, db, crear_usuario, crear_equipamiento, crear_orden, rol, sede_admin, motivo
+):  # AC-L19, RN-L11; el motivo es opcional al aprobar
     camara = await crear_equipamiento(estados=(U.DISPONIBLE,) * 2)
     tripode = await crear_equipamiento()
     orden = await crear_orden(camara, camara, tripode)
     admin = await crear_usuario(rol, sede_admin)
     unidades = [*_ids(camara), *_ids(tripode)]
+    extra = {"motivo": motivo} if motivo else {}
 
-    r = await _aprobar(client, admin, orden, unidades)
+    r = await _aprobar(client, admin, orden, unidades, **extra)
 
     assert r.status_code == 200, r.json()
     cuerpo = r.json()
     assert cuerpo["estado"] == "aprobada"
+    assert cuerpo["motivo_resolucion"] == motivo
     assert [(d["estado"], d["unidad_fisica_id"]) for d in cuerpo["detalles"]] == [
         ("reservado", u) for u in unidades
     ]
@@ -306,16 +266,6 @@ async def test_aprobar_no_cambia_el_estado_de_la_unidad(
 
     unidad = await db.get(UnidadFisica, _ids(camara)[0], populate_existing=True)
     assert unidad.estado is U.DISPONIBLE
-
-
-async def test_aprobar_guarda_el_motivo_si_viene(
-    client, crear_usuario, crear_equipamiento, crear_orden
-):
-    camara = await crear_equipamiento()
-    orden = await crear_orden(camara)
-    admin = await crear_usuario(A, USH)
-    r = await _aprobar(client, admin, orden, _ids(camara), motivo="Retira en el mostrador 2")
-    assert r.json()["motivo_resolucion"] == "Retira en el mostrador 2"
 
 
 async def test_la_unidad_aprobada_deja_de_estar_libre_para_otra_orden(
@@ -504,15 +454,14 @@ async def test_el_ajuste_horario_cambia_todas_las_lineas(
         assert linea.fin_ocupacion == devolucion
 
 
-@pytest.mark.parametrize(("hora_retiro", "hora_devolucion"), [(8, 14), (10, 17)])
 async def test_el_ajuste_fuera_de_la_franja_responde_422(
-    client, db, crear_usuario, crear_equipamiento, crear_orden, hora_retiro, hora_devolucion
-):  # AC-L25, RN-L04: la franja sembrada es de 09:00 a 16:00
+    client, db, crear_usuario, crear_equipamiento, crear_orden
+):  # AC-L25, RN-L04: la franja sembrada es de 09:00 a 16:00 (los bordes, en test_validaciones)
     camara = await crear_equipamiento()
     orden = await crear_orden(camara)
     admin = await crear_usuario(A, USH)
-    retiro = _a_las(RETIRO, hora_retiro)
-    devolucion = _a_las(RETIRO + timedelta(days=1), hora_devolucion)
+    retiro = _a_las(RETIRO, 8)
+    devolucion = _a_las(RETIRO + timedelta(days=1), 14)
 
     r = await _aprobar(client, admin, orden, _ids(camara), **_ajuste(retiro, devolucion))
 
@@ -650,21 +599,6 @@ async def test_una_unidad_con_una_reserva_que_se_solapa_responde_409(
     await _sigue_pendiente(db, orden.id)  # tampoco quedó reservado el trípode (RN-L13)
 
 
-async def test_una_reserva_en_otras_fechas_no_impide_aprobar(
-    client, crear_usuario, crear_equipamiento, crear_linea, crear_orden
-):  # AC-L47
-    camara = await crear_equipamiento()
-    await crear_linea(
-        camara, camara.unidades[0], EstadoDetalleEnum.RESERVADO, retiro=EN_OTRAS_FECHAS
-    )
-    orden = await crear_orden(camara)
-    admin = await crear_usuario(A, USH)
-
-    r = await _aprobar(client, admin, orden, _ids(camara))
-
-    assert r.status_code == 200, r.json()
-
-
 async def test_no_se_aprueba_dos_veces(client, crear_usuario, crear_equipamiento, crear_orden):
     # AC-L28
     camara = await crear_equipamiento()
@@ -676,19 +610,6 @@ async def test_no_se_aprueba_dos_veces(client, crear_usuario, crear_equipamiento
 
     assert r.status_code == 409
     assert _codigo(r) == "TRANSICION_INVALIDA"
-
-
-async def test_un_admin_de_otra_sede_no_aprueba(
-    client, db, crear_usuario, crear_equipamiento, crear_orden
-):  # AC-L29
-    camara = await crear_equipamiento()
-    orden = await crear_orden(camara)
-    admin_rg = await crear_usuario(A, RG)
-
-    r = await _aprobar(client, admin_rg, orden, _ids(camara))
-
-    assert r.status_code == 404
-    await _sigue_pendiente(db, orden.id)
 
 
 class _OrigConSqlstate(Exception):

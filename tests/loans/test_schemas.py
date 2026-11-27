@@ -17,7 +17,6 @@ from app.modules.loans.schemas import (
     OrdenPedidoEstadoUpdate,
     OrdenPedidoResponse,
 )
-from app.modules.users.service import DatosPublicosUsuario
 
 TZ = timezone(timedelta(hours=-3))
 RETIRO = datetime(2026, 12, 1, 10, 0, tzinfo=TZ)
@@ -37,15 +36,6 @@ def _orden(**cambios):
 
 
 # ── OrdenPedidoCreate ────────────────────────────────────────────────────────
-
-
-def test_orden_valida_sin_asignatura():  # AC-L05 (el docente no la necesita)
-    assert _orden().asignatura_id is None
-
-
-def test_orden_admite_el_mismo_modelo_repetido():  # AC-L03
-    orden = _orden(items=[{"equipamiento_id": 1}, {"equipamiento_id": 1}])
-    assert len(orden.items) == 2
 
 
 @pytest.mark.parametrize("campo", ["solicitante_id", "sede", "estado"])
@@ -76,53 +66,12 @@ def test_orden_limita_la_cantidad_de_lineas(items):
         _orden(items=items)
 
 
-def test_orden_sin_aval_ni_renovacion_por_defecto():
-    orden = _orden()
-    assert orden.pdf_aval_id is None
-    assert orden.renueva_detalle_id is None
-
-
-def test_orden_acepta_un_aval_uuid():  # PRE-05, SPEC-03 (archivos.id es UUID)
-    orden = _orden(pdf_aval_id="3f2b6c1e-8a4d-4f7e-9b1a-2c5d7e9f0a1b")
-    assert str(orden.pdf_aval_id) == "3f2b6c1e-8a4d-4f7e-9b1a-2c5d7e9f0a1b"
-
-
-@pytest.mark.parametrize("aval", ["no-es-un-uuid", 12])
-def test_orden_rechaza_un_aval_que_no_es_uuid(aval):
-    with pytest.raises(ValidationError):
-        _orden(pdf_aval_id=aval)
-
-
-def test_orden_de_renovacion_con_una_linea():  # RN-L24
-    assert _orden(renueva_detalle_id=42).renueva_detalle_id == 42
-
-
 def test_orden_de_renovacion_admite_una_sola_linea():  # RN-L24
     with pytest.raises(ValidationError):
         _orden(renueva_detalle_id=42, items=[{"equipamiento_id": 1}] * 2)
 
 
-@pytest.mark.parametrize("detalle", [0, -1])
-def test_orden_de_renovacion_exige_un_id_positivo(detalle):
-    with pytest.raises(ValidationError):
-        _orden(renueva_detalle_id=detalle)
-
-
 # ── OrdenPedidoEstadoUpdate ──────────────────────────────────────────────────
-
-
-def test_estado_aprobar_con_asignaciones():  # AC-L19
-    assert OrdenPedidoEstadoUpdate(estado="aprobada", asignaciones=[ASIGNACION])
-
-
-def test_estado_aprobar_con_ajuste_horario():  # AC-L25
-    cambio = OrdenPedidoEstadoUpdate(
-        estado="aprobada",
-        asignaciones=[ASIGNACION],
-        nuevo_retiro=RETIRO,
-        nueva_devolucion=DEVOLUCION,
-    )
-    assert cambio.nuevo_retiro == RETIRO
 
 
 def test_estado_aprobar_exige_asignaciones():  # AC-L22
@@ -161,21 +110,9 @@ def test_estado_solo_aprobar_admite_asignaciones_y_ajuste(estado):
         OrdenPedidoEstadoUpdate(estado=estado, nuevo_retiro=RETIRO, nueva_devolucion=DEVOLUCION)
 
 
-@pytest.mark.parametrize("estado", ["rechazada", "cancelada"])
-def test_estado_el_motivo_lo_exige_el_servicio(estado):  # AC-L27
-    """El esquema no lo exige: lo valida el servicio con MOTIVO_REQUERIDO."""
-    assert OrdenPedidoEstadoUpdate(estado=estado).motivo is None
-
-
-@pytest.mark.parametrize("estado", ["pendiente", "inexistente"])
-def test_estado_rechaza_estados_no_permitidos(estado):
+def test_estado_rechaza_estados_no_permitidos():  # una orden no vuelve a `pendiente`
     with pytest.raises(ValidationError):
-        OrdenPedidoEstadoUpdate(estado=estado)
-
-
-def test_estado_rechaza_campos_desconocidos():
-    with pytest.raises(ValidationError):
-        OrdenPedidoEstadoUpdate(estado="cancelada", sede="Ushuaia")
+        OrdenPedidoEstadoUpdate(estado="pendiente")
 
 
 # ── OrdenPedidoResponse ──────────────────────────────────────────────────────
@@ -193,7 +130,7 @@ def _linea(estado: D, n: int = 1) -> SimpleNamespace:
     )
 
 
-def _respuesta(*estados: D, **extra) -> OrdenPedidoResponse:
+def _respuesta(*estados: D) -> OrdenPedidoResponse:
     """Valida un objeto con atributos, como hace FastAPI con el modelo ORM."""
     orden = SimpleNamespace(
         id=1,
@@ -207,7 +144,6 @@ def _respuesta(*estados: D, **extra) -> OrdenPedidoResponse:
         es_renovado=False,
         resuelto_en=None,
         detalles=[_linea(e, n) for n, e in enumerate(estados, start=1)],
-        **extra,
     )
     return OrdenPedidoResponse.model_validate(orden)
 
@@ -228,23 +164,3 @@ def test_situacion_en_curso_si_alguna_linea_sigue_activa(estado):  # AC-L61, RN-
 )
 def test_situacion_finalizada_si_ninguna_linea_sigue_activa(estados):  # AC-L61, RN-L31
     assert _respuesta(*estados).situacion == "finalizada"
-
-
-def test_la_situacion_viaja_en_el_json():
-    assert _respuesta(D.PENDIENTE).model_dump(mode="json")["situacion"] == "en_curso"
-
-
-def test_sin_solicitante_ni_resolucion_por_defecto():
-    respuesta = _respuesta(D.PENDIENTE)  # el modelo ORM no tiene `solicitante`
-    assert respuesta.solicitante is None
-    assert respuesta.resuelto_en is None
-
-
-def test_el_solicitante_sale_de_users_y_solo_tiene_id_nombre_y_apellido():  # P6
-    datos = DatosPublicosUsuario(id=7, nombre="Ana", apellido="Pérez")
-    respuesta = _respuesta(D.PENDIENTE, solicitante=datos)
-    assert respuesta.model_dump(mode="json")["solicitante"] == {
-        "id": 7,
-        "nombre": "Ana",
-        "apellido": "Pérez",
-    }

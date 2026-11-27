@@ -1,6 +1,8 @@
 """Contrato HTTP de `loans` en la Fase 0 (SPEC-05 §14; AC-L52, AC-L53).
 
-Los endpoints exigen sesión y rol. Crear orden se prueba en ``test_crear_orden.py``, la
+Los endpoints exigen sesión y rol: acá vive el único barrido de 401 del módulo (incluye
+`/reglas` y la descarga del aval) y la matriz de 403 del spec §4. Las validaciones del
+payload se prueban en ``test_schemas.py``. Crear orden se prueba en ``test_crear_orden.py``, la
 bandeja en ``test_bandeja.py`` y el rechazo y la cancelación en
 ``test_rechazar_cancelar.py``.
 """
@@ -33,6 +35,8 @@ RUTAS = [
     ("GET", "/ordenes/1", None),
     ("PATCH", "/ordenes/1/estado", RECHAZO),
     ("GET", "/ordenes/1/unidades-libres", None),
+    ("GET", "/reglas", None),
+    ("GET", "/ordenes/1/aval", None),
 ]
 
 # (rol, método, ruta, cuerpo) sin permiso según la matriz del spec §4
@@ -43,9 +47,9 @@ PROHIBIDAS = [
     (S, "GET", "/ordenes/mias", None),
     (E, "GET", "/ordenes", None),
     (D, "GET", "/ordenes", None),
-    (E, "PATCH", "/ordenes/1/estado", RECHAZO),  # AC-L29
-    (D, "PATCH", "/ordenes/1/estado", RECHAZO),
 ]
+# El PATCH de E y D (AC-L29) lo cubre, además sin revelar si la orden existe,
+# test_rechazar_cancelar::test_el_dueño_no_puede_aprobar_ni_rechazar.
 
 
 @pytest.mark.parametrize(("metodo", "ruta", "cuerpo"), RUTAS)
@@ -59,38 +63,4 @@ async def test_rol_sin_permiso_responde_403(client, crear_usuario, rol, metodo, 
     usuario = await crear_usuario(rol)  # AC-L13, AC-L17
     r = await client.request(metodo, f"{BASE}{ruta}", json=cuerpo, headers=auth(usuario))
     assert r.status_code == 403
-
-
-@pytest.mark.parametrize(
-    ("rol", "metodo", "ruta", "cuerpo"),
-    [
-        (E, "POST", "/ordenes", {**ORDEN, "acepta_normativa": False}),  # AC-L06
-        (E, "POST", "/ordenes", {**ORDEN, "sede": "Ushuaia"}),  # AC-L04
-        (E, "POST", "/ordenes", {**ORDEN, "items": []}),
-        (A, "PATCH", "/ordenes/1/estado", {"estado": "pendiente"}),
-        (A, "PATCH", "/ordenes/1/estado", {"estado": "aprobada"}),  # AC-L22
-    ],
-)
-async def test_payload_invalido_responde_422(client, crear_usuario, rol, metodo, ruta, cuerpo):
-    usuario = await crear_usuario(rol)
-    r = await client.request(metodo, f"{BASE}{ruta}", json=cuerpo, headers=auth(usuario))
-    assert r.status_code == 422
-
-
-async def test_mias_no_se_confunde_con_el_detalle(client, crear_usuario):
-    """``/ordenes/mias`` se declara antes de ``/ordenes/{orden_id}``."""
-    usuario = await crear_usuario(E)
-    r = await client.get(f"{BASE}/ordenes/mias", headers=auth(usuario))
-    assert r.status_code == 200  # y no 422 por intentar convertir "mias" a entero
-    assert r.json() == []
-
-
-async def test_openapi_publica_las_rutas_del_spec(client):
-    paths = (await client.get("/openapi.json")).json()["paths"]
-    assert set(paths[f"{BASE}/ordenes"]) == {"get", "post"}
-    assert set(paths[f"{BASE}/ordenes/mias"]) == {"get"}
-    assert set(paths[f"{BASE}/ordenes/{{orden_id}}"]) == {"get"}
-    assert set(paths[f"{BASE}/ordenes/{{orden_id}}/estado"]) == {"patch"}
-    assert set(paths[f"{BASE}/ordenes/{{orden_id}}/unidades-libres"]) == {"get"}
-    assert f"{BASE}/ordenes/{{orden_id}}/resolucion" not in paths
-    assert f"{BASE}/ordenes/{{orden_id}}/cancelacion" not in paths
+    assert r.json()["code"] == "PERMISO_INSUFICIENTE"

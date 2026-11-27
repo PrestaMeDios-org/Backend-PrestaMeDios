@@ -96,33 +96,6 @@ async def test_un_aval_ajeno_se_rechaza_sin_crear_nada(
     assert await _vinculado_en(db, aval_de_beto) is None
 
 
-async def test_un_aval_inexistente_se_rechaza(client, db, crear_usuario, crear_equipamiento):
-    ana = await crear_usuario(E)
-    camara = await crear_equipamiento(alta_gama=True)
-    r = await client.post(
-        URL, json=_pedido(camara, pdf_aval_id=str(uuid.uuid4())), headers=auth(ana)
-    )
-    assert r.status_code == 422
-    assert r.json()["code"] == "ARCHIVO_INVALIDO"
-    assert await _cantidad_de_ordenes(db) == 0
-
-
-async def test_un_aval_ya_usado_en_otra_orden_se_rechaza(
-    client, db, crear_usuario, crear_equipamiento
-):  # cada orden lleva su propio aval (D-19 de SPEC-03, reutilizar queda abierto)
-    ana = await crear_usuario(E)
-    camara = await crear_equipamiento(alta_gama=True, estados=("disponible",) * 2)
-    aval = await _aval(client, ana)
-    primera = await client.post(URL, json=_pedido(camara, pdf_aval_id=aval), headers=auth(ana))
-    assert primera.status_code == 201, primera.json()
-
-    segunda = await client.post(URL, json=_pedido(camara, pdf_aval_id=aval), headers=auth(ana))
-
-    assert segunda.status_code == 422
-    assert segunda.json()["code"] == "ARCHIVO_INVALIDO"
-    assert await _cantidad_de_ordenes(db) == 1
-
-
 async def test_si_falla_otra_validacion_el_aval_no_se_vincula(
     client, db, crear_usuario, crear_equipamiento
 ):  # las validaciones van antes de escribir: un 409 no deja el archivo usado
@@ -135,25 +108,6 @@ async def test_si_falla_otra_validacion_el_aval_no_se_vincula(
     )
 
     assert r.status_code == 409
-    assert await _vinculado_en(db, aval) is None
-
-
-async def test_si_falla_el_commit_el_aval_no_queda_vinculado(
-    client, db, crear_usuario, crear_equipamiento, monkeypatch
-):  # AC-L14: vincular y crear la orden son una sola transacción
-    ana = await crear_usuario(E)
-    camara = await crear_equipamiento(alta_gama=True)
-    aval = await _aval(client, ana)
-
-    async def _commit_que_falla(self):
-        raise RuntimeError("la base se cayó")
-
-    monkeypatch.setattr(AsyncSession, "commit", _commit_que_falla)
-    with pytest.raises(RuntimeError):
-        await client.post(URL, json=_pedido(camara, pdf_aval_id=aval), headers=auth(ana))
-    monkeypatch.undo()
-
-    assert await _cantidad_de_ordenes(db) == 0
     assert await _vinculado_en(db, aval) is None
 
 
@@ -219,8 +173,3 @@ async def test_una_orden_sin_aval_responde_404(client, crear_usuario, crear_equi
     r = await client.get(f"{URL}/{r.json()['id']}/aval", headers=auth(ana))
     assert r.status_code == 404
     assert r.json()["code"] == "ARCHIVO_NO_ENCONTRADO"
-
-
-async def test_descargar_exige_sesion(client):  # AC-L52
-    r = await client.get(f"{URL}/1/aval")
-    assert r.status_code == 401

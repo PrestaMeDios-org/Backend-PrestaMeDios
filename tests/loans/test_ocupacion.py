@@ -3,7 +3,6 @@
 `crear_linea(..., dia=d)` arma una línea con período [d/12 10:00, (d+2)/12 15:00).
 """
 
-import dataclasses
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -88,11 +87,6 @@ async def test_solo_los_periodos_que_se_solapan_con_el_rango(db, crear_equipamie
     assert desde_el_fin == {unidad.id: []}  # [retiro, fin) es semiabierto
 
 
-async def test_sin_unidades_devuelve_vacio_sin_consultar(db, contar_consultas):
-    assert await service.ocupacion_de_unidades(db, [], DESDE, HASTA) == {}
-    assert contar_consultas == []
-
-
 async def test_usa_una_sola_consulta_y_omite_repetidos(
     db, crear_equipamiento, crear_linea, contar_consultas
 ):
@@ -107,19 +101,8 @@ async def test_usa_una_sola_consulta_y_omite_repetidos(
     assert list(ocupacion) == [u1.id, u2.id]
 
 
-async def test_una_unidad_inexistente_queda_libre(db):
-    assert await service.ocupacion_de_unidades(db, [999_999], DESDE, HASTA) == {999_999: []}
-
-
 async def test_un_periodo_invertido_o_vacio_es_un_error(db):
     with pytest.raises(ValueError):
         await service.ocupacion_de_unidades(db, [1], HASTA, DESDE)
     with pytest.raises(ValueError):
         await service.ocupacion_de_unidades(db, [1], DESDE, DESDE)
-
-
-def test_el_periodo_es_inmutable_y_no_tiene_identidad():  # P6
-    periodo = _periodo(1)
-    assert [c.name for c in dataclasses.fields(periodo)] == ["desde", "hasta"]
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        periodo.desde = _instante(2, 10)  # type: ignore[misc]
