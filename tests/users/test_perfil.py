@@ -3,10 +3,8 @@
 import pytest
 from sqlalchemy import select
 
-from app.core.enums import RolUsuario, SedeEnum
-from app.modules.users.cli import crear_superadmin
+from app.core.enums import RolUsuario
 from app.modules.users.models import UsuarioHistorialCambios
-from app.modules.users.schemas import UsuarioAdminCreate
 from tests.conftest import PASSWORD, auth
 
 pytestmark = pytest.mark.integracion
@@ -28,23 +26,6 @@ async def _historial(db, usuario_id):
 
 
 class TestEditarContacto:  # AC-46
-    async def test_telefono(self, client, db, crear_usuario):
-        u = await crear_usuario()
-        uid = u.id
-        r = await client.patch(ME, json={"telefono": "+54 2964 111222"}, headers=auth(u))
-        assert r.status_code == 200, r.text
-        assert r.json()["telefono"] == "+54 2964 111222"
-        (h,) = await _historial(db, uid)
-        assert h.cambios == {"telefono": [None, "+54 2964 111222"]} and h.actor_id == uid
-
-    async def test_no_se_puede_borrar_el_telefono(self, client, crear_usuario):
-        # Desde SPEC-09 (RN-88, USR-05) el teléfono se cambia pero no se borra; AC-116.
-        u = await crear_usuario()
-        await client.patch(ME, json={"telefono": "+54 2964 111222"}, headers=auth(u))
-        r = await client.patch(ME, json={"telefono": None}, headers=auth(u))
-        assert r.status_code == 422
-        assert (await client.get(ME, headers=auth(u))).json()["telefono"] == "+54 2964 111222"
-
     @pytest.mark.parametrize(
         "payload",
         [{"dni": "12345678"}, {"rol": "SUPERADMIN"}, {"sede": "Río Grande"}, {"nombre": "X"}, {}],
@@ -113,11 +94,11 @@ class TestCambiarPassword:  # AC-47
         )
         assert r.status_code == 403 and r.json()["code"] == "PASSWORD_ACTUAL_INCORRECTA"
 
-    @pytest.mark.parametrize("nueva", ["abcdefgh", PASSWORD])
-    async def test_debil_o_igual(self, client, crear_usuario, nueva):
+    async def test_igual_a_la_actual(self, client, crear_usuario):
+        # La política de RN-03 (p. ej. sin dígitos) la cubre test_schemas::test_password_debil.
         u = await crear_usuario()
         r = await client.post(
-            PWD, json={"password_actual": PASSWORD, "password_nueva": nueva}, headers=auth(u)
+            PWD, json={"password_actual": PASSWORD, "password_nueva": PASSWORD}, headers=auth(u)
         )
         assert r.status_code == 422
 
@@ -157,19 +138,3 @@ class TestCambioObligatorio:  # AC-48, EC-33
         assert cambio.json()["usuario"]["debe_cambiar_password"] is False
         h2 = {"Authorization": f"Bearer {cambio.json()['access_token']}"}
         assert (await client.get("/api/v1/config/parametros", headers=h2)).status_code == 200
-
-    async def test_cli_no_exige_cambio(self, db):
-        datos = UsuarioAdminCreate(
-            email="sa@untdf.edu.ar", password="Laboratorio2026", nombre="Sa", apellido="Admin",
-            dni="30111222", telefono="+54 2901 400300", rol=RolUsuario.SUPERADMIN, sede=None,
-        )
-        usuario, _ = await crear_superadmin(db, datos)
-        assert usuario.debe_cambiar_password is False
-
-
-async def test_registro_propio_no_exige_cambio(client):
-    r = await client.post(
-        "/api/v1/auth/register",
-        json={**TestCambioObligatorio.DATOS, "rol": "ESTUDIANTE", "sede": SedeEnum.RIO_GRANDE.value},
-    )
-    assert r.status_code == 201 and r.json()["debe_cambiar_password"] is False

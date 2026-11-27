@@ -33,17 +33,19 @@ async def _historial(db, usuario_id: int) -> list[UsuarioHistorialEstado]:
     return list(res.all())
 
 
-async def test_registro_exitoso_queda_pendiente(client, db):  # AC-01
+async def test_registro_exitoso_queda_pendiente(client, db):  # AC-01, AC-113 (SPEC-09)
     r = await client.post(URL, json=DATOS)
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["estado"] == "PENDIENTE_APROBACION"
     assert body["rol"] == "ESTUDIANTE" and body["sede"] == "Ushuaia"
+    assert body["debe_cambiar_password"] is False  # SPEC-02 A9: la eligió el propio usuario
     assert "access_token" not in body and "password_hash" not in body and "password" not in body
 
     usuario = await db.get(Usuario, body["id"])
     assert usuario.password_hash.startswith("$argon2id$")
     assert DATOS["password"] not in usuario.password_hash
+    assert usuario.telefono == DATOS["telefono"]
 
     hist = await _historial(db, body["id"])
     assert [(h.estado_anterior, h.estado_nuevo, h.actor_id) for h in hist] == [
@@ -80,16 +82,6 @@ async def test_no_se_autoasignan_privilegios(client, db, cambio):  # AC-03, EC-2
 @pytest.mark.parametrize("sede", [None, "Ambas sedes"])
 async def test_sede_obligatoria(client, sede):  # AC-04
     assert (await client.post(URL, json={**DATOS, "sede": sede})).status_code == 422
-
-
-@pytest.mark.parametrize("password", ["abcdefgh", "1234567"])
-async def test_password_debil(client, password):  # AC-05
-    assert (await client.post(URL, json={**DATOS, "password": password})).status_code == 422
-
-
-async def test_password_igual_al_email(client):  # AC-05
-    datos = {**DATOS, "email": "ana2026@untdf.edu.ar", "password": "ana2026@untdf.edu.ar"}
-    assert (await client.post(URL, json=datos)).status_code == 422
 
 
 async def test_re_registro_tras_rechazo(client, db, crear_usuario):  # AC-06, D-04

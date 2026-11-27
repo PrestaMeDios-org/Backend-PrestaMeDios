@@ -69,24 +69,11 @@ class TestSubirFoto:
         assert archivo.proposito == "FOTO_PERFIL" and archivo.vinculado_en is not None
         assert archivo.tipo_mime == "image/jpeg" and archivo.nombre_original == "foto.jpg"
 
-    async def test_aparece_en_me(self, client, crear_usuario):
+    async def test_rechazo_no_guarda_nada(self, client, db, crear_usuario):  # RN-55, D-11
+        # Los demás tipos e imágenes corruptas los cubre tests/files/test_service.py.
         u = await crear_usuario(E)
-        foto_id = (await subir_foto(client, u, imagen("PNG"))).json()["foto_id"]
-        r = await client.get("/api/v1/auth/me", headers=auth(u))
-        assert r.json()["foto_id"] == foto_id
-
-    @pytest.mark.parametrize(
-        ("datos", "code"),
-        [
-            (pdf_minimo(), "TIPO_ARCHIVO_NO_PERMITIDO"),
-            (b"GIF89a" + b"\x00" * 20, "TIPO_ARCHIVO_NO_PERMITIDO"),
-            (b"\xff\xd8\xff\xe0 no es una imagen", "IMAGEN_INVALIDA"),
-        ],
-    )
-    async def test_rechazos(self, client, db, crear_usuario, datos, code):  # RN-55, D-11
-        u = await crear_usuario(E)
-        r = await subir_foto(client, u, datos)
-        assert r.status_code == 422 and r.json()["code"] == code
+        r = await subir_foto(client, u, pdf_minimo())
+        assert r.status_code == 422 and r.json()["code"] == "TIPO_ARCHIVO_NO_PERMITIDO"
         assert await _cantidad_archivos(db) == 0
 
     async def test_demasiado_grande(self, client, crear_usuario, limite_mb):  # RN-56

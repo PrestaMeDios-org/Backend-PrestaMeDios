@@ -52,14 +52,15 @@ async def _cuentas(db) -> int:
     return await db.scalar(select(func.count()).select_from(Usuario))
 
 
-async def _cambios(db, usuario_id: int) -> list[dict]:
+async def _cambios(db, usuario_id: int) -> list[tuple[dict, int | None]]:
+    """``(cambios, actor_id)`` de cada fila del historial de edición, en orden."""
     db.expire_all()
     filas = await db.scalars(
         select(UsuarioHistorialCambios)
         .where(UsuarioHistorialCambios.usuario_id == usuario_id)
         .order_by(UsuarioHistorialCambios.id)
     )
-    return [h.cambios for h in filas.all()]
+    return [(h.cambios, h.actor_id) for h in filas.all()]
 
 
 # ── Altas ────────────────────────────────────────────────────────────────────
@@ -70,12 +71,6 @@ async def test_registro_exige_telefono(client, db, datos):  # AC-113, RN-86
     r = await client.post(REGISTRO, json=datos)
     assert r.status_code == 422, r.text
     assert await _cuentas(db) == 0
-
-
-async def test_registro_con_telefono(client, db):  # AC-113
-    r = await client.post(REGISTRO, json=DATOS_REGISTRO)
-    assert r.status_code == 201, r.text
-    assert (await db.get(Usuario, r.json()["id"])).telefono == TELEFONO
 
 
 async def test_re_registro_exige_telefono_y_lo_reemplaza(client, db, crear_usuario):  # AC-114, EC-58
@@ -116,8 +111,8 @@ async def test_mi_perfil_no_borra_el_telefono(client, db, crear_usuario):  # AC-
     r = await client.patch(ME, json={"telefono": "+54 2964 111222"}, headers=auth(u))
     assert r.status_code == 200 and r.json()["telefono"] == "+54 2964 111222"
     assert await _cambios(db, uid) == [
-        {"telefono": [None, TELEFONO]},
-        {"telefono": [TELEFONO, "+54 2964 111222"]},
+        ({"telefono": [None, TELEFONO]}, uid),
+        ({"telefono": [TELEFONO, "+54 2964 111222"]}, uid),
     ]
 
 
