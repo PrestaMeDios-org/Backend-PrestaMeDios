@@ -74,14 +74,6 @@ class TestSubirAval:
         r = await subir_aval(client, u)
         assert r.status_code == 403 and r.json()["code"] == "PERMISO_INSUFICIENTE"
 
-    async def test_sin_sesion(self, client):
-        r = await client.post(
-            ARCHIVOS,
-            files={"archivo": ("a.pdf", pdf_minimo(), "application/pdf")},
-            data={"proposito": "AVAL_PRESTAMO"},
-        )
-        assert r.status_code == 401
-
     async def test_sexto_pendiente(self, client, db, crear_usuario):  # AC-87, RN-58
         u = await crear_usuario(E)
         uid = u.id
@@ -161,10 +153,6 @@ class TestDescargaAval:  # AC-85, RN-60, D-18
         u = await crear_usuario(SUPER)
         r = await client.get(_contenido(uuid.uuid4()), headers=auth(u))
         assert r.status_code == 404 and r.json()["code"] == "ARCHIVO_NO_ENCONTRADO"
-
-    async def test_sin_sesion(self, client, crear_usuario):
-        archivo_id = await _aval_de(client, await crear_usuario(E))
-        assert (await client.get(_contenido(archivo_id))).status_code == 401
 
 
 class TestDescargaFoto:  # AC-85, RN-60

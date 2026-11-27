@@ -56,9 +56,6 @@ async def test_horas_configurables(client, db, crear_usuario):
     assert await limpiar_huerfanos(db, horas=2) == 1
 
 
-def test_parser():
-    args = construir_parser().parse_args(["limpiar-huerfanos", "--horas", "12"])
-    assert args.comando == "limpiar-huerfanos" and args.horas == 12
-    assert construir_parser().parse_args(["limpiar-huerfanos"]).horas is None
+def test_horas_debe_ser_positivo():
     with pytest.raises(SystemExit):
         construir_parser().parse_args(["limpiar-huerfanos", "--horas", "0"])

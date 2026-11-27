@@ -1,7 +1,9 @@
 """SPEC-09 Fase A · horario y correo de contacto por sede (GLO-02, GLO-03).
 
-AC-103…AC-111; EC-53, EC-55 y EC-56. AC-102, AC-112 y la parte de migración de
-AC-103 están en ``test_migracion_0017.py``; AC-109, en ``test_semilla.py``.
+AC-103…AC-110; EC-53, EC-55 y EC-56. AC-102, AC-112 y la parte de migración de
+AC-103 están en ``test_migracion_0017.py``; AC-109, en ``test_semilla.py``; AC-111, en
+``test_parametros.py::test_solo_superadmin_escribe``. Parámetro no editable (FA-04 de UC-09):
+``test_globales_obsoletas_no_se_editan``.
 """
 
 import asyncio
@@ -183,13 +185,6 @@ async def test_correo_de_contacto(client, db, crear_usuario):  # AC-107, RN-80
     assert (await db.get(ParametroGlobal, clave)).valor == "lab.rg@example.com"
 
 
-async def test_admin_local_no_edita_su_sede(client, crear_usuario):  # AC-111, RN-85, D-08
-    admin = await crear_usuario(R.ADMIN_LOCAL, SedeEnum.USHUAIA)
-    for clave, valor in (("horario.ushuaia.apertura", "08:00"), ("contacto.ushuaia.email", "a@example.com")):
-        r = await _put(client, admin, clave, valor=valor, version=1)
-        assert r.status_code == 403, clave
-
-
 # ── Lectura para otros módulos (§4.4) ───────────────────────────────────────
 
 
@@ -240,11 +235,10 @@ async def test_datos_de_sede_sin_una_clave(db, sesion):  # AC-108, RN-82
 # ── Lectura por la API (§4.5) ────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("rol", list(R))
-async def test_get_sedes_para_cualquier_rol(client, crear_usuario, set_parametro, rol):  # AC-110, EC-56
+async def test_get_sedes_para_cualquier_usuario(client, crear_usuario, set_parametro):  # AC-110, EC-56
+    # El endpoint no distingue roles: basta el de menos permisos, de la otra sede.
     await set_parametro("contacto.rio_grande.email", "lab.rg@example.com")
-    sede = None if rol == R.SUPERADMIN else SedeEnum.USHUAIA
-    usuario = await crear_usuario(rol, sede)
+    usuario = await crear_usuario(R.ESTUDIANTE, SedeEnum.USHUAIA)
 
     r = await client.get(URL_SEDES, headers=auth(usuario))
     assert r.status_code == 200, r.text
