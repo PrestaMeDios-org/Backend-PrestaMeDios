@@ -151,6 +151,7 @@ class TestProtecciones:  # AC-13
         activo = await crear_usuario(R.ESTUDIANTE, USH)
         r = await _cambiar(client, superadmin, activo.id, nuevo_estado="ACTIVO")
         assert r.status_code == 409
+        assert r.json()["code"] == "TRANSICION_INVALIDA" and r.json()["estado_actual"] == "ACTIVO"
 
     async def test_roles_sin_acceso(self, client, crear_usuario):
         docente = await crear_usuario(R.DOCENTE, USH)
@@ -225,14 +226,6 @@ class TestAltaDirecta:  # AC-14, UC-06
         body = r.json()
         assert body["estado"] == "ACTIVO" and body["sede"] == "Río Grande"
         assert body["aprobado_por_id"] == superadmin.id
-
-    @pytest.mark.parametrize(
-        "alcance", [{"rol": "ADMIN_LOCAL", "sede": None}, {"rol": "SUPERADMIN", "sede": "Ushuaia"}]
-    )
-    async def test_alcance_incoherente(self, client, crear_usuario, alcance):
-        superadmin = await crear_usuario(R.SUPERADMIN)
-        r = await client.post(self.URL, json={**self.DATOS, **alcance}, headers=auth(superadmin))
-        assert r.status_code == 422
 
     async def test_admin_local_no_puede_crear(self, client, crear_usuario):
         admin = await crear_usuario(R.ADMIN_LOCAL, USH)

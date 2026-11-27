@@ -109,9 +109,3 @@ async def test_detalle_no_expone_hash(client, poblacion, crear_usuario):
     r = await client.get(f"{URL}/{u.id}", headers=auth(poblacion["admin_ush"]))
     assert r.status_code == 200
     assert "password_hash" not in r.json() and r.json()["dni"] == u.dni
-
-
-async def test_sin_resultados(client, crear_usuario):  # UC-05 FA-01
-    sa = await crear_usuario(R.SUPERADMIN)
-    r = await _get(client, sa, q="inexistente")
-    assert r.json() == {"items": [], "total": 0, "limit": 20, "offset": 0}

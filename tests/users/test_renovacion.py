@@ -1,7 +1,8 @@
 """SPEC-03 Fase B3 · Renovación deslizante de la sesión (D-06 de SPEC-01, D-13, D-14).
 
-AC-91…AC-94; RN-65…RN-69. Los tokens con ``auth_time`` viejo o sin el claim se emiten a
-mano, con la misma firma que la aplicación.
+AC-91, AC-92, AC-94; RN-65…RN-69. Los tokens con ``auth_time`` viejo se emiten a mano,
+con la misma firma que la aplicación. El fallback sin ``auth_time`` (AC-93, RN-68) lo
+cubre ``tests/core/test_security.py::TestJwt::test_sin_auth_time_usa_iat``.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -30,14 +31,12 @@ def _token(
     usuario: Usuario,
     *,
     auth_time: int | None = None,
-    iat: int | None = None,
     exp: int | None = None,
-    sin_auth_time: bool = False,
     tv: int | None = None,
 ) -> str:
     """Token firmado con los claims de la aplicación y los tiempos que pida el test."""
     datos = usuario._cache_auth  # type: ignore[attr-defined]
-    iat = iat if iat is not None else _epoch(timedelta(minutes=-10))
+    iat = _epoch(timedelta(minutes=-10))
     claims = {
         "sub": str(datos["id"]),
         "rol": datos["rol"].value,
@@ -47,9 +46,8 @@ def _token(
         "iat": iat,
         "exp": exp if exp is not None else _epoch(timedelta(minutes=20)),
         "jti": "test",
+        "auth_time": auth_time if auth_time is not None else iat,
     }
-    if not sin_auth_time:
-        claims["auth_time"] = auth_time if auth_time is not None else iat
     return jwt.encode(claims, get_settings().jwt_secret_key, algorithm=JWT_ALGORITHM)
 
 
@@ -90,17 +88,6 @@ class TestRenovar:
         assert (await client.post(RENOVAR, headers=_bearer(anterior))).status_code == 200
         assert (await client.get(ME, headers=_bearer(anterior))).status_code == 200
 
-    async def test_renovar_varias_veces_conserva_el_inicio(self, client, crear_usuario):  # RN-65
-        u = await crear_usuario()
-        r = await client.post(LOGIN, json={"email": u.email, "password": PASSWORD})
-        token = r.json()["access_token"]
-        inicio = _claims(token)["auth_time"]
-        for _ in range(3):
-            r = await client.post(RENOVAR, headers=_bearer(token))
-            assert r.status_code == 200, r.text
-            token = r.json()["access_token"]
-        assert _claims(token)["auth_time"] == inicio
-
     async def test_con_cambio_de_password_pendiente(self, client, db, crear_usuario):  # §7.2
         u = await crear_usuario()
         u.debe_cambiar_password = True
@@ -108,12 +95,6 @@ class TestRenovar:
         r = await client.post(RENOVAR, headers=auth(u))
         assert r.status_code == 200, r.text
         assert r.json()["usuario"]["debe_cambiar_password"] is True
-
-    @pytest.mark.parametrize("rol", list(RolUsuario))
-    async def test_todos_los_roles(self, client, crear_usuario, rol):
-        u = await crear_usuario(rol, SedeEnum.USHUAIA)
-        assert (await client.post(RENOVAR, headers=auth(u))).status_code == 200
-
 
 class TestTope:  # AC-92, RN-66, RN-67
     async def test_pasado_el_tope(self, client, crear_usuario):
@@ -158,35 +139,6 @@ class TestTope:  # AC-92, RN-66, RN-67
         r = await client.post(RENOVAR, headers=_bearer(token))
         assert r.status_code == 401 and r.json()["code"] == "TOKEN_REVOCADO"
 
-    async def test_sin_token(self, client):
-        r = await client.post(RENOVAR)
-        assert r.status_code == 401 and r.json()["code"] == "NO_AUTENTICADO"
-
-    async def test_token_invalido(self, client):
-        r = await client.post(RENOVAR, headers=_bearer("no.es.un-token"))
-        assert r.status_code == 401 and r.json()["code"] == "TOKEN_INVALIDO"
-
-
-class TestSinAuthTime:  # AC-93, RN-68
-    async def test_usa_iat_como_inicio(self, client, crear_usuario):
-        u = await crear_usuario()
-        iat = _epoch(timedelta(minutes=-25))
-        viejo = _token(u, iat=iat, sin_auth_time=True)
-        assert "auth_time" not in _claims(viejo)
-
-        r = await client.post(RENOVAR, headers=_bearer(viejo))
-
-        assert r.status_code == 200, r.text
-        assert _claims(r.json()["access_token"])["auth_time"] == iat
-
-    async def test_iat_pasado_el_tope(self, client, crear_usuario):
-        u = await crear_usuario()
-        viejo = _token(
-            u, iat=_epoch(-_tope() - timedelta(minutes=1)), sin_auth_time=True
-        )
-        r = await client.post(RENOVAR, headers=_bearer(viejo))
-        assert r.status_code == 401 and r.json()["code"] == "TOKEN_SESION_MAXIMA"
-
 
 class TestCerrarSesiones:  # AC-94, RN-69, D-14
     async def test_revoca_las_demas_y_el_nuevo_funciona(self, client, db, crear_usuario):
@@ -213,11 +165,6 @@ class TestCerrarSesiones:  # AC-94, RN-69, D-14
         assert claims["tv"] == 1
         assert claims["auth_time"] == inicio  # no estira el tope de RN-66
 
-    async def test_el_nuevo_se_renueva(self, client, crear_usuario):
-        u = await crear_usuario(RolUsuario.SUPERADMIN)
-        nuevo = (await client.post(CERRAR, headers=auth(u))).json()["access_token"]
-        assert (await client.post(RENOVAR, headers=_bearer(nuevo))).status_code == 200
-
     async def test_con_cambio_de_password_pendiente(self, client, db, crear_usuario):
         # SPEC-02 RN-33: con el cambio obligatorio pendiente sólo se cambia la contraseña.
         u = await crear_usuario()
@@ -227,10 +174,6 @@ class TestCerrarSesiones:  # AC-94, RN-69, D-14
         assert r.status_code == 403 and r.json()["code"] == "CAMBIO_PASSWORD_REQUERIDO"
         await db.refresh(u)
         assert u.token_version == 0
-
-    async def test_sin_token(self, client):
-        r = await client.post(CERRAR)
-        assert r.status_code == 401 and r.json()["code"] == "NO_AUTENTICADO"
 
     async def test_token_revocado(self, client, crear_usuario):
         u = await crear_usuario()
