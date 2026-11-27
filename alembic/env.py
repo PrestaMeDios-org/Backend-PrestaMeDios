@@ -58,7 +58,13 @@ async def run_async_migrations() -> None:
 
 
 def run_migrations_online() -> None:
-    asyncio.run(run_async_migrations())
+    # Una conexión pasada por `config.attributes` (tests/test_migraciones.py) se usa tal
+    # cual; sin ella, se conecta a DATABASE_URL como siempre.
+    conexion = config.attributes.get("connection")
+    if conexion is not None:
+        do_run_migrations(conexion)
+    else:
+        asyncio.run(run_async_migrations())
 
 
 if context.is_offline_mode():
