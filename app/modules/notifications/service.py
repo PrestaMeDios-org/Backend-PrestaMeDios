@@ -5,29 +5,32 @@ Este archivo tiene dos partes:
 - **Interna** (comunicados, Fase A): la usan sólo los endpoints de este módulo.
   Excepción: ``filtro_lectura`` y ``bloquear_para_editar`` son públicas para que
   ``portada.py`` (SPEC-10 M-02) aplique exactamente las mismas reglas (SPEC-10 U4).
-- **Pública** (``crear_notificacion``, Fase B, §6): se agrega en la Fase B y es
+- **Pública** (``crear_notificacion`` y ``crear_notificaciones``, Fase B, §6): es
   la única parte que otros módulos pueden importar.
 
-Las funciones internas no hacen ``commit``: lo hace el endpoint.
+Ninguna función hace ``commit``: lo hace el endpoint o el módulo que llama.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 
-from sqlalchemy import ColumnElement, and_, func, or_, select
+from sqlalchemy import ColumnElement, and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import resolver_alcance_sede
 from app.core.enums import ROLES_ADMIN, RolUsuario, SedeEnum
 from app.core.errors import AppError
 from app.core.settings import ZONA_HORARIA_LAB, ahora_lab
-from app.modules.notifications.enums import EstadoComunicado
-from app.modules.notifications.models import Comunicado
+from app.modules.notifications.enums import EstadoComunicado, Severidad, TipoNotificacion
+from app.modules.notifications.models import Comunicado, Notificacion
+from app.modules.notifications.plantillas import renderizar
 from app.modules.notifications.schemas import (
     AutorComunicado,
     ComunicadoCreate,
     ComunicadoResponse,
     ComunicadoUpdate,
+    NotificacionResponse,
+    ReferenciaNotificacion,
 )
 from app.modules.users.models import Usuario
 from app.modules.users.service import datos_publicos_por_ids
@@ -250,3 +253,168 @@ async def a_respuestas(
             )
         )
     return respuestas
+
+
+# ── Notificaciones personales: lectura y marcado (NOV-04, Fase B) ────────────
+
+
+def notificacion_no_encontrada() -> AppError:
+    return AppError(404, "NOTIFICACION_NO_ENCONTRADA", "Notificación no encontrada.")
+
+
+def _propias(usuario: Usuario) -> ColumnElement[bool]:
+    """Sólo las del usuario del token (RN-N6): nunca se acepta otro ``usuario_id``."""
+    return Notificacion.usuario_id == usuario.id
+
+
+async def listar_notificaciones(
+    db: AsyncSession, usuario: Usuario, *, solo_no_leidas: bool, limit: int, offset: int
+) -> tuple[list[Notificacion], int]:
+    """Críticas sin leer primero; después el resto, de la más nueva a la más vieja."""
+    condiciones = [_propias(usuario)]
+    if solo_no_leidas:
+        condiciones.append(Notificacion.leida_en.is_(None))
+    critica_sin_leer = case(
+        (and_(Notificacion.leida_en.is_(None), Notificacion.severidad == Severidad.CRITICA), 0),
+        else_=1,
+    )
+    total = await db.scalar(select(func.count()).select_from(Notificacion).where(*condiciones))
+    filas = await db.scalars(
+        select(Notificacion)
+        .where(*condiciones)
+        .order_by(critica_sin_leer, Notificacion.creada_en.desc(), Notificacion.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    return list(filas.all()), total or 0
+
+
+async def resumen_notificaciones(db: AsyncSession, usuario: Usuario) -> tuple[int, int]:
+    """``(no_leidas, criticas_no_leidas)`` en una consulta (índice parcial de §7)."""
+    fila = (
+        await db.execute(
+            select(
+                func.count(),
+                func.count().filter(Notificacion.severidad == Severidad.CRITICA),
+            ).where(_propias(usuario), Notificacion.leida_en.is_(None))
+        )
+    ).one()
+    return fila[0], fila[1]
+
+
+async def marcar_leida(db: AsyncSession, usuario: Usuario, notificacion_id: int) -> Notificacion:
+    """Marca una como leída (RN-N11). Idempotente: conserva la primera lectura.
+
+    Un único ``UPDATE`` con ``coalesce``: dos marcados simultáneos no se pisan.
+    Ajena o inexistente → ``404`` (P4.5).
+    """
+    notificacion = await db.scalar(
+        update(Notificacion)
+        .where(Notificacion.id == notificacion_id, _propias(usuario))
+        .values(leida_en=func.coalesce(Notificacion.leida_en, func.now()))
+        .returning(Notificacion)
+        .execution_options(populate_existing=True)
+    )
+    if notificacion is None:
+        raise notificacion_no_encontrada()
+    return notificacion
+
+
+async def leer_todas(db: AsyncSession, usuario: Usuario) -> int:
+    """Marca las ``NORMAL`` sin leer (RN-N9, RN-N14); las críticas quedan sin leer."""
+    resultado = await db.execute(
+        update(Notificacion)
+        .where(
+            _propias(usuario),
+            Notificacion.leida_en.is_(None),
+            Notificacion.severidad == Severidad.NORMAL,
+        )
+        .values(leida_en=func.now())
+        .execution_options(synchronize_session=False)
+    )
+    return resultado.rowcount or 0
+
+
+def notificacion_a_respuesta(n: Notificacion) -> NotificacionResponse:
+    referencia = (
+        ReferenciaNotificacion(modulo=n.referencia_modulo, id=n.referencia_id)  # type: ignore[arg-type]
+        if n.referencia_modulo is not None and n.referencia_id is not None
+        else None
+    )
+    return NotificacionResponse(
+        id=n.id,
+        tipo=TipoNotificacion(n.tipo),
+        severidad=n.severidad,
+        titulo=n.titulo,
+        mensaje=n.mensaje,
+        referencia=referencia,
+        creada_en=_local(n.creada_en),
+        leida_en=_local(n.leida_en),
+    )
+
+
+# ── API pública para otros módulos (SPEC-06 §6) ──────────────────────────────
+#
+# Lo que está debajo de esta línea es contrato: `loans` y `spaces` (y, en la
+# Fase C, `users`) lo importan. No hace `commit`, `rollback` ni `flush` (RN-N10).
+
+
+def _nueva(
+    usuario_id: int,
+    tipo: TipoNotificacion,
+    contenido: tuple[Severidad, str, str],
+    referencia: ReferenciaNotificacion | None,
+) -> Notificacion:
+    severidad, titulo, mensaje = contenido
+    return Notificacion(
+        usuario_id=usuario_id,
+        tipo=tipo.value,
+        severidad=severidad,
+        titulo=titulo,
+        mensaje=mensaje,
+        referencia_modulo=referencia.modulo if referencia else None,
+        referencia_id=referencia.id if referencia else None,
+    )
+
+
+async def crear_notificacion(
+    db: AsyncSession,
+    usuario_id: int,
+    tipo: TipoNotificacion,
+    datos: Mapping[str, str],
+    *,
+    referencia: ReferenciaNotificacion | None = None,
+) -> Notificacion:
+    """Agrega una notificación a la transacción de quien llama (NOV-04, RN-N10).
+
+    - No hace ``commit``, ``rollback`` ni ``flush``: si el llamador deshace su
+      transacción, la notificación también se deshace.
+    - Valida ``datos`` contra las claves del tipo y lanza ``ValueError`` antes de
+      agregar nada si falta o sobra una clave (RN-N7).
+    - Arma título y mensaje con la plantilla del tipo; no consulta el estado de la
+      cuenta del destinatario (RN-N12).
+    """
+    notificacion = _nueva(usuario_id, tipo, renderizar(tipo, datos), referencia)
+    db.add(notificacion)
+    return notificacion
+
+
+async def crear_notificaciones(
+    db: AsyncSession,
+    usuario_ids: Iterable[int],
+    tipo: TipoNotificacion,
+    datos: Mapping[str, str],
+    *,
+    referencia: ReferenciaNotificacion | None = None,
+) -> list[Notificacion]:
+    """Lo mismo que ``crear_notificacion`` para varios destinatarios (RES-05).
+
+    Ids repetidos se notifican una sola vez; una lista vacía no hace nada.
+    """
+    destinatarios = list(dict.fromkeys(usuario_ids))
+    if not destinatarios:
+        return []
+    contenido = renderizar(tipo, datos)
+    notificaciones = [_nueva(u, tipo, contenido, referencia) for u in destinatarios]
+    db.add_all(notificaciones)
+    return notificaciones

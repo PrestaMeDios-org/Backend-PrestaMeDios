@@ -5,11 +5,12 @@
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.enums import SedeEnum
-from app.modules.notifications.enums import EstadoComunicado
+from app.modules.notifications.enums import EstadoComunicado, Severidad, TipoNotificacion
 
 _INPUT_CONFIG = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -114,3 +115,52 @@ class ComunicadoResponse(BaseModel):
 class ComunicadosPage(BaseModel):
     items: list[ComunicadoResponse]
     total: int = Field(..., examples=[1])
+
+
+# ── Notificaciones personales (NOV-04, Fase B) ───────────────────────────────
+
+
+class ReferenciaNotificacion(BaseModel):
+    """Recurso al que se refiere la notificación (SPEC-06 §5.2).
+
+    Sólo orienta al frontend: abrir el recurso sigue pasando por los permisos del
+    módulo dueño, así que la referencia no da acceso a nada.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    modulo: Literal["loans", "spaces", "users"] = Field(..., examples=["loans"])
+    id: int = Field(..., ge=1, examples=[42])
+
+
+class NotificacionResponse(BaseModel):
+    id: int = Field(..., examples=[7])
+    tipo: TipoNotificacion = Field(..., examples=["ORDEN_HORARIO_AJUSTADO"])
+    severidad: Severidad = Field(..., examples=["CRITICA"])
+    titulo: str = Field(..., examples=["Aprobada con horario modificado"])
+    mensaje: str = Field(
+        ...,
+        examples=[
+            "Tu solicitud N° 42 fue aprobada con otro horario. "
+            "Retiro: 12/11 10:00. Devolución: 14/11 15:00."
+        ],
+    )
+    referencia: ReferenciaNotificacion | None = Field(..., description="null si no hay recurso.")
+    creada_en: datetime = Field(..., examples=["2026-11-27T10:00:00-03:00"])
+    leida_en: datetime | None = Field(..., examples=[None])
+
+
+class NotificacionesPage(BaseModel):
+    items: list[NotificacionResponse]
+    total: int = Field(..., examples=[1])
+
+
+class ResumenNotificaciones(BaseModel):
+    """Lo que consulta la campanita cada 60 s (D-N04)."""
+
+    no_leidas: int = Field(..., examples=[3])
+    criticas_no_leidas: int = Field(..., examples=[1])
+
+
+class LeerTodasResponse(BaseModel):
+    marcadas: int = Field(..., description="Notificaciones NORMAL marcadas como leídas.", examples=[2])
