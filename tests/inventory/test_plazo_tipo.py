@@ -24,16 +24,16 @@ async def _editar(client, admin, equipo, cambios):
     return r.json()
 
 
-async def test_cambiar_a_notebook_recalcula_el_plazo(client, admin, crear_equipo):  # INV-29
-    equipo = await crear_equipo(unidades=((USH,),), max_dias_prestamo=7)
-    cuerpo = await _editar(client, admin, equipo, {"es_notebook": True})
-    assert cuerpo["es_notebook"] is True and cuerpo["max_dias_prestamo"] == 12
-
-
-async def test_cambiar_de_notebook_a_general_recalcula_el_plazo(client, admin, crear_equipo):  # INV-29
-    equipo = await crear_equipo(unidades=((USH,),), es_notebook=True, max_dias_prestamo=9)
-    cuerpo = await _editar(client, admin, equipo, {"es_notebook": False})
-    assert cuerpo["es_notebook"] is False and cuerpo["max_dias_prestamo"] == 3
+@pytest.mark.parametrize(
+    ("era_notebook", "plazo_esperado"),
+    [(False, 12), (True, 3)],  # general → notebook toma 12; notebook → general toma 3
+)
+async def test_cambiar_el_tipo_recalcula_el_plazo(
+    client, admin, crear_equipo, era_notebook, plazo_esperado
+):  # INV-29
+    equipo = await crear_equipo(unidades=((USH,),), es_notebook=era_notebook, max_dias_prestamo=7)
+    cuerpo = await _editar(client, admin, equipo, {"es_notebook": not era_notebook})
+    assert cuerpo["es_notebook"] is (not era_notebook) and cuerpo["max_dias_prestamo"] == plazo_esperado
 
 
 async def test_el_plazo_enviado_gana(client, admin, crear_equipo):  # INV-29

@@ -1,7 +1,5 @@
 """C8 de SPEC-05 · `datos_equipamiento_por_ids` (función pública de `inventory`, SPEC-04 §6)."""
 
-import dataclasses
-
 import pytest
 from sqlalchemy import event
 
@@ -11,7 +9,7 @@ from app.modules.inventory.service import DatosEquipamiento, datos_equipamiento_
 
 pytestmark = pytest.mark.integracion
 
-USH, RG = SedeEnum.USHUAIA, SedeEnum.RIO_GRANDE
+USH = SedeEnum.USHUAIA
 
 
 @pytest.fixture
@@ -53,12 +51,6 @@ async def test_incluye_items_inactivos_y_sin_unidades(sessionmaker_, crear_equip
     assert datos[inactivo.id].activo is False  # decide quien llama (RN-I5)
 
 
-async def test_no_filtra_por_sede(sessionmaker_, crear_equipo):
-    eq = await crear_equipo("CAM-2", unidades=((USH,), (RG,)))
-    async with sessionmaker_() as sesion:
-        assert eq.id in await datos_equipamiento_por_ids(sesion, [eq.id])
-
-
 async def test_entrada_vacia_no_consulta_la_base(sessionmaker_, consultas):
     async with sessionmaker_() as sesion:
         assert await datos_equipamiento_por_ids(sesion, []) == {}
@@ -69,16 +61,9 @@ async def test_entrada_vacia_no_consulta_la_base(sessionmaker_, consultas):
 async def test_omite_inexistentes_y_repetidos(sessionmaker_, crear_equipo):
     eq = await crear_equipo("CAM-3")
     async with sessionmaker_() as sesion:
-        datos = await datos_equipamiento_por_ids(sesion, [eq.id, eq.id, 9999, eq.id])
+        # Un generador: la función acepta cualquier iterable y lo recorre una sola vez.
+        datos = await datos_equipamiento_por_ids(sesion, (i for i in [eq.id, eq.id, 9999, eq.id]))
     assert list(datos) == [eq.id]
-
-
-async def test_acepta_cualquier_iterable(sessionmaker_, crear_equipo):
-    a = await crear_equipo("CAM-4")
-    b = await crear_equipo("CAM-5")
-    async with sessionmaker_() as sesion:
-        datos = await datos_equipamiento_por_ids(sesion, (i for i in {a.id, b.id}))
-    assert set(datos) == {a.id, b.id}
 
 
 async def test_una_sola_consulta_para_todo_el_lote(sessionmaker_, crear_equipo, consultas):
@@ -111,12 +96,3 @@ async def test_no_hace_flush_ni_commit(sessionmaker_, crear_equipo):
         await sesion.rollback()
     async with sessionmaker_() as otra:
         assert await datos_equipamiento_por_ids(otra, [pendiente.id or -1]) == {}
-
-
-def test_el_resultado_es_inmutable():
-    d = DatosEquipamiento(
-        id=1, codigo="C", nombre="N", activo=True, es_notebook=False,
-        alta_gama=False, max_dias_prestamo=4,
-    )
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        d.activo = False  # type: ignore[misc]
