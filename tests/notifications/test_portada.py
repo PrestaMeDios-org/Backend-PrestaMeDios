@@ -1,7 +1,4 @@
-"""MOMENTÁNEO (SPEC-10 M-02, §4.7) · Portada elegible de los comunicados.
-
-Se borra junto con ``app/modules/notifications/portada.py`` (SPEC-10 §1.4).
-"""
+"""Portada elegible de los comunicados (SPEC-06 §15; SPEC-10 M-02, §4.7) · AC-U20."""
 
 import io
 

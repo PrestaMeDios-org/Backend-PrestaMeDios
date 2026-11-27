@@ -1,9 +1,9 @@
-"""MOMENTÁNEO (SPEC-10 M-02, §4.7) · Migración ``0020_notifications_portada``.
+"""Portada de los comunicados (SPEC-06 §15; SPEC-10 M-02, §4.7) · Migración ``0020_notifications_portada``.
 
 Se corre de verdad sobre la base de tests con un ``Operations`` de Alembic ligado a la
 conexión de la sesión, como ``tests/config/test_migracion_0017.py``. La base parte con
 ``comunicados_portada`` creada por ``create_all``: el test baja, verifica que sólo se fue
-esa tabla, y vuelve a subir. Se borra junto con ``portada.py`` (SPEC-10 §1.4).
+esa tabla, y vuelve a subir.
 """
 
 import importlib.util
