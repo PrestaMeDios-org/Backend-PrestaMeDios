@@ -6,6 +6,8 @@
 # Otro archivo: PMD_ENV_FILE=… y --env-file … (pruebas locales).
 # Ningún servicio publica puertos: todo entra por el túnel de Cloudflare (NFR-P05).
 # El frontend se construye desde el clon hermano (FRONTEND_DIR).
+# Las imágenes propias se etiquetan `:prod`; deploy/actualizar.sh construye y migra
+# con `PMD_IMAGEN=candidata` y sólo las pasa a `:prod` si todo salió bien.
 name: prestamedios
 
 x-logging: &logging
@@ -54,7 +56,7 @@ services:
     build:
       context: .
       target: final
-    image: prestamedios-api:prod
+    image: prestamedios-api:${PMD_IMAGEN:-prod}
     restart: unless-stopped
     logging: *logging
     env_file: ${PMD_ENV_FILE:-.env}
@@ -73,7 +75,7 @@ services:
       context: ${FRONTEND_DIR:-../Frontend-PrestaMeDios}
       args:
         VITE_API_URL: ""
-    image: prestamedios-web:prod
+    image: prestamedios-web:${PMD_IMAGEN:-prod}
     restart: unless-stopped
     logging: *logging
     environment:
@@ -90,7 +92,7 @@ services:
     build:
       context: .
       target: tareas
-    image: prestamedios-tareas:prod
+    image: prestamedios-tareas:${PMD_IMAGEN:-prod}
     restart: unless-stopped
     logging: *logging
     env_file: ${PMD_ENV_FILE:-.env}
