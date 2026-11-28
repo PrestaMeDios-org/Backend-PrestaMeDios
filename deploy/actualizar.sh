@@ -4,6 +4,11 @@
 # Uso: deploy/actualizar.sh vAAAA.MM.N
 # El mismo tag tiene que existir en Backend y Frontend. Si la migración falla, vuelve
 # los repos al tag anterior y no reinicia nada: la versión en servicio sigue andando.
+#
+# Las imágenes nuevas se construyen como `:candidata` y la migración corre con ellas.
+# Sólo si todo sale bien pasan a `:prod`, que es lo que levanta compose.prod.yaml. Así,
+# si algo falla (o se corta el script), `:prod` sigue siendo la versión en servicio y
+# un `docker compose up -d` posterior no levanta código sin migrar.
 set -euo pipefail
 
 TAG="${1:?Uso: actualizar.sh vAAAA.MM.N}"
@@ -11,6 +16,9 @@ cd "$(dirname "$0")/.."
 BACKEND="$(pwd)"
 FRONTEND="$(realpath "${FRONTEND_DIR:-../Frontend-PrestaMeDios}")"
 COMPOSE=(docker compose -f compose.prod.yaml ${COMPOSE_EXTRA:-})
+# Las mismas imágenes con la etiqueta de prueba (compose.prod.yaml usa PMD_IMAGEN).
+CANDIDATA=(env PMD_IMAGEN=candidata "${COMPOSE[@]}")
+IMAGENES=(prestamedios-api prestamedios-web prestamedios-tareas)
 
 anterior_back="$(git describe --tags --always)"
 anterior_front="$(git -C "$FRONTEND" describe --tags --always)"
@@ -19,7 +27,7 @@ volver() {
     echo "actualizar: ERROR en «$1». Vuelvo los repos a ${anterior_back} / ${anterior_front}." >&2
     git -C "$BACKEND" checkout -q "$anterior_back"
     git -C "$FRONTEND" checkout -q "$anterior_front"
-    echo "actualizar: la versión en servicio no se tocó. Si la migración dejó cambios, restaurar la copia previa (deploy/restaurar.sh)." >&2
+    echo "actualizar: la versión en servicio y sus imágenes (:prod) no se tocaron. Si la migración dejó cambios, restaurar la copia previa (deploy/restaurar.sh)." >&2
     exit 1
 }
 
@@ -33,12 +41,15 @@ for repo in "$BACKEND" "$FRONTEND"; do
     git -C "$repo" fetch -q --tags origin || volver "git fetch en $(basename "$repo")"
     git -C "$repo" checkout -q "refs/tags/${TAG}" || volver "el tag no existe en $(basename "$repo")"
 done
-"${COMPOSE[@]}" build || volver "build de las imágenes"
+"${CANDIDATA[@]}" build api web tareas || volver "build de las imágenes"
 
-echo "== 3. Migraciones"
-"${COMPOSE[@]}" run --rm --no-deps api alembic upgrade head || volver "alembic upgrade head"
+echo "== 3. Migraciones (con la imagen candidata)"
+"${CANDIDATA[@]}" run --rm --no-deps api alembic upgrade head || volver "alembic upgrade head"
 
 echo "== 4. Reinicio"
+for imagen in "${IMAGENES[@]}"; do
+    docker tag "${imagen}:candidata" "${imagen}:prod"
+done
 "${COMPOSE[@]}" up -d --remove-orphans
 
 echo "== 5. Verificación"
