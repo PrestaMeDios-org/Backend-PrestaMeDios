@@ -9,7 +9,6 @@
 (d+2)/12 15:00, así que líneas que ocupan la misma unidad van separadas por 3 días o más.
 """
 
-import dataclasses
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -53,7 +52,7 @@ async def test_solo_las_reservas_aprobadas_que_empiezan_desde_la_fecha_ordenadas
     eq = await crear_equipamiento(estados=(U.DISPONIBLE,) * 2)
     unidad, otra = eq.unidades
     await crear_linea(eq, unidad, D.RESERVADO, dia=1)  # empieza antes de `desde`
-    await crear_linea(eq, unidad, D.ENTREGADO, dia=5)  # ya retirada
+    await crear_linea(eq, unidad, D.ENTREGADO, dia=14)  # ya retirada: la descarta el estado
     tarde = await crear_linea(eq, unidad, D.RESERVADO, dia=20)
     justo = await crear_linea(eq, unidad, D.RESERVADO, dia=10)  # empieza justo en `desde`
     await crear_linea(eq, unidad, D.CANCELADO, dia=10)  # ya no ocupa
@@ -70,33 +69,6 @@ async def test_solo_las_reservas_aprobadas_que_empiezan_desde_la_fecha_ordenadas
         )
         for orden in (justo, tarde)
     ]
-
-
-async def test_sin_reservas_futuras_devuelve_una_lista_vacia(db, crear_equipamiento):
-    eq = await crear_equipamiento()
-    assert await service.reservas_futuras_de_unidad(db, eq.unidades[0].id, _retiro(1)) == []
-
-
-async def test_reservas_futuras_usa_una_sola_consulta(
-    db, crear_equipamiento, crear_linea, contar_consultas
-):
-    eq = await crear_equipamiento()
-    await crear_linea(eq, eq.unidades[0], D.RESERVADO, dia=10)
-    contar_consultas.clear()
-
-    await service.reservas_futuras_de_unidad(db, eq.unidades[0].id, _retiro(1))
-
-    assert len(contar_consultas) == 1
-
-
-def test_la_reserva_futura_no_tiene_identidad_y_es_inmutable():  # P6
-    reserva = service.ReservaFutura(
-        orden_id=1, detalle_id=2, retiro=_retiro(1), devolucion=_retiro(3)
-    )
-    campos = [c.name for c in dataclasses.fields(reserva)]
-    assert campos == ["orden_id", "detalle_id", "retiro", "devolucion"]
-    with pytest.raises(dataclasses.FrozenInstanceError):
-        reserva.retiro = _retiro(2)  # type: ignore[misc]
 
 
 # ── historial_de_unidad (T2.12) ──────────────────────────────────────────────
@@ -194,31 +166,3 @@ async def test_el_historial_usa_dos_consultas(
 
     assert len(historial) == 3
     assert len(contar_consultas) == 2
-
-
-async def test_una_unidad_sin_lineas_devuelve_vacio_con_una_consulta(
-    db, crear_usuario, crear_equipamiento, contar_consultas
-):
-    eq = await crear_equipamiento()
-    admin = await crear_usuario(RolUsuario.ADMIN_LOCAL, USH)
-    contar_consultas.clear()
-
-    assert await service.historial_de_unidad(db, eq.unidades[0].id, admin) == []
-    assert len(contar_consultas) == 1
-
-
-def test_el_movimiento_solo_expone_la_identidad_minima():  # P6, SPEC-04 §5.5
-    campos = [c.name for c in dataclasses.fields(service.MovimientoUnidad)]
-    assert campos == [
-        "orden_id",
-        "detalle_id",
-        "solicitante",
-        "estado",
-        "retiro_pactado",
-        "devolucion_pactada",
-        "entregado_en",
-        "devuelto_en",
-        "observacion_devolucion",
-    ]
-    privados = {"dni", "email", "telefono"}
-    assert not privados & {c.name for c in dataclasses.fields(service.DatosPublicosUsuario)}

@@ -4,7 +4,8 @@
 `pendiente` con motivo; el solicitante cancela su orden `pendiente`. Cada transición
 deja la resolución (`resuelto_por_id`, `resuelto_en`) y una fila en
 `ordenes_historial_estado` (D-L10). El administrador cancela una `aprobada` con motivo
-y sin entregas (T2.9). Aprobar se prueba en `test_aprobar.py`.
+y sin entregas (T2.9). Aprobar se prueba en `test_aprobar.py`, salvo el alcance de sede
+(un admin de otra sede no aprueba, rechaza ni cancela), que se prueba acá para las tres.
 """
 
 from datetime import datetime, timedelta
@@ -13,6 +14,8 @@ import pytest
 from sqlalchemy import select
 
 from app.core.enums import RolUsuario, SedeEnum
+from app.modules.inventory.enums import EstadoUnidadEnum as U
+from app.modules.inventory.models import UnidadFisica
 from app.modules.loans.enums import EstadoDetalleEnum, EstadoOrdenEnum
 from app.modules.loans.models import DetallePrestamo, OrdenHistorialEstado, OrdenPedido
 from tests.conftest import TZ, auth
@@ -38,10 +41,15 @@ ESTADO_LINEA = {
 
 @pytest.fixture
 def crear_orden(db, crear_equipamiento):
-    """Fábrica: una orden con dos líneas sin unidad, en el estado indicado."""
+    """Fábrica: una orden con dos líneas sin unidad, en el estado indicado.
 
-    async def _crear(solicitante, estado: EstadoOrdenEnum = P, sede: SedeEnum = USH):
-        equipamiento = await crear_equipamiento(sede=sede)
+    ``unidades`` es la cantidad de unidades disponibles del modelo (para poder aprobarla).
+    """
+
+    async def _crear(
+        solicitante, estado: EstadoOrdenEnum = P, sede: SedeEnum = USH, unidades: int = 1
+    ):
+        equipamiento = await crear_equipamiento(sede=sede, estados=(U.DISPONIBLE,) * unidades)
         retiro = datetime(2026, 12, 1, 10, tzinfo=TZ)
         devolucion = retiro + timedelta(days=2, hours=5)
         orden = OrdenPedido(
@@ -129,17 +137,7 @@ async def test_el_admin_rechaza_con_motivo(
     assert cuerpo["solicitante"]["nombre"] == "Ana"
     orden = await _orden(db, orden_id)
     assert orden.resuelto_por_id == _id(admin)
-
-
-async def test_el_rechazo_queda_en_el_historial(client, db, crear_usuario, crear_orden):
-    # D-L10, P7.3
-    ana = await crear_usuario(E, USH)
-    orden_id = await crear_orden(ana)
-    admin = await crear_usuario(A, USH)
-
-    await _patch(client, admin, orden_id, RECHAZO)
-
-    [fila] = await _historial(db, orden_id)
+    [fila] = await _historial(db, orden_id)  # D-L10, P7.3
     assert fila.estado_anterior is EstadoOrdenEnum.PENDIENTE
     assert fila.estado_nuevo is EstadoOrdenEnum.RECHAZADA
     assert fila.motivo == RECHAZO["motivo"]
@@ -199,26 +197,7 @@ async def test_la_transicion_se_controla_antes_que_el_motivo(
     admin = await crear_usuario(A, USH)
     r = await _patch(client, admin, orden_id, {"estado": "rechazada"})
     assert r.status_code == 409
-
-
-async def test_un_admin_de_otra_sede_recibe_404(client, db, crear_usuario, crear_orden):
-    # AC-L29, RN-L26
-    ana = await crear_usuario(E, USH)
-    orden_id = await crear_orden(ana)
-    admin_rg = await crear_usuario(A, RG)
-
-    r = await _patch(client, admin_rg, orden_id, RECHAZO)
-
-    assert r.status_code == 404
-    assert r.json()["code"] == "ORDEN_NO_ENCONTRADA"
-    await _sin_cambios(db, orden_id, P)
-
-
-async def test_una_orden_inexistente_responde_404(client, crear_usuario):
-    admin = await crear_usuario(A, USH)
-    r = await _patch(client, admin, 999, RECHAZO)
-    assert r.status_code == 404
-    assert r.json()["code"] == "ORDEN_NO_ENCONTRADA"
+    assert r.json()["code"] == "TRANSICION_INVALIDA"
 
 
 @pytest.mark.parametrize("rol", [E, D])
@@ -237,23 +216,64 @@ async def test_el_dueño_no_puede_aprobar_ni_rechazar(
     await _sin_cambios(db, orden_id, P)
 
 
+@pytest.mark.parametrize("accion", ["aprobar", "rechazar", "cancelar_aprobada"])
+async def test_un_admin_de_otra_sede_no_cambia_la_orden(
+    client, db, crear_usuario, crear_orden, crear_equipamiento, crear_linea, accion
+):  # AC-L29, RN-L26: `cambiar_estado_orden` arranca por `_orden_con_alcance`
+    ana = await crear_usuario(E, USH)
+    if accion == "cancelar_aprobada":
+        camara = await crear_equipamiento()
+        orden_id = (await crear_linea(camara, camara.unidades[0], EstadoDetalleEnum.RESERVADO)).id
+        cuerpo = {"estado": "cancelada", "motivo": "x"}
+    elif accion == "rechazar":
+        orden_id = await crear_orden(ana)
+        cuerpo = RECHAZO
+    else:  # pendiente con una unidad asignable por línea: el admin de Ushuaia podría aprobarla
+        orden_id = await crear_orden(ana, unidades=2)
+        lineas = (await _orden(db, orden_id)).detalles
+        unidades = await db.scalars(
+            select(UnidadFisica.id)
+            .where(UnidadFisica.equipamiento_id == lineas[0].equipamiento_id)
+            .order_by(UnidadFisica.id)
+        )
+        cuerpo = {
+            "estado": "aprobada",
+            "asignaciones": [
+                {"detalle_id": d.id, "unidad_fisica_id": u}
+                for d, u in zip(lineas, unidades.all(), strict=True)
+            ],
+        }
+    antes = await _orden(db, orden_id)
+    estado, lineas_antes = antes.estado, [(d.estado, d.unidad_fisica_id) for d in antes.detalles]
+    admin_rg = await crear_usuario(A, RG)
+
+    r = await _patch(client, admin_rg, orden_id, cuerpo)
+
+    assert r.status_code == 404
+    assert r.json()["code"] == "ORDEN_NO_ENCONTRADA"
+    await _sin_cambios(db, orden_id, estado)
+    despues = await _orden(db, orden_id)
+    assert [(d.estado, d.unidad_fisica_id) for d in despues.detalles] == lineas_antes
+
+
 # ── Cancelar la propia ───────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("rol", [E, D])
+@pytest.mark.parametrize(("rol", "motivo"), [(E, None), (D, "Ya no lo uso")])
 async def test_el_dueño_cancela_su_orden_pendiente(
-    client, db, crear_usuario, crear_orden, rol
-):  # AC-L31, RN-L16
+    client, db, crear_usuario, crear_orden, rol, motivo
+):  # AC-L31, RN-L16; el motivo es opcional para el dueño
     dueño = await crear_usuario(rol, USH)
     orden_id = await crear_orden(dueño)
+    cuerpo = {**CANCELACION, "motivo": motivo} if motivo else CANCELACION
 
-    r = await _patch(client, dueño, orden_id, CANCELACION)
+    r = await _patch(client, dueño, orden_id, cuerpo)
 
     assert r.status_code == 200, r.json()
     cuerpo = r.json()
     assert cuerpo["estado"] == "cancelada"
     assert [d["estado"] for d in cuerpo["detalles"]] == ["cancelado", "cancelado"]
-    assert cuerpo["motivo_resolucion"] is None
+    assert cuerpo["motivo_resolucion"] == motivo
     assert cuerpo["resuelto_en"] is not None
     assert cuerpo["solicitante"] is None  # el dueño no recibe su resumen
     orden = await _orden(db, orden_id)
@@ -261,19 +281,7 @@ async def test_el_dueño_cancela_su_orden_pendiente(
     [fila] = await _historial(db, orden_id)
     assert (fila.estado_anterior, fila.estado_nuevo) == (P, EstadoOrdenEnum.CANCELADA)
     assert fila.actor_id == _id(dueño)
-    assert fila.motivo is None
-
-
-async def test_el_dueño_puede_dejar_un_motivo(client, db, crear_usuario, crear_orden):
-    ana = await crear_usuario(E, USH)
-    orden_id = await crear_orden(ana)
-
-    r = await _patch(client, ana, orden_id, {"estado": "cancelada", "motivo": "Ya no lo uso"})
-
-    assert r.status_code == 200
-    assert r.json()["motivo_resolucion"] == "Ya no lo uso"
-    [fila] = await _historial(db, orden_id)
-    assert fila.motivo == "Ya no lo uso"
+    assert fila.motivo == motivo
 
 
 async def test_el_dueño_no_puede_cancelar_una_aprobada(client, db, crear_usuario):
@@ -383,17 +391,4 @@ async def test_el_admin_no_cancela_una_orden_con_equipos_entregados(
 
     assert r.status_code == 409
     assert r.json()["code"] == "TRANSICION_INVALIDA"
-    await _sin_cambios(db, orden.id, EstadoOrdenEnum.APROBADA)
-
-
-async def test_un_admin_de_otra_sede_no_cancela_una_aprobada(
-    client, db, crear_usuario, crear_equipamiento, crear_linea
-):  # RN-L26
-    camara = await crear_equipamiento()
-    orden = await crear_linea(camara, camara.unidades[0], EstadoDetalleEnum.RESERVADO)
-    admin_rg = await crear_usuario(A, RG)
-
-    r = await _patch(client, admin_rg, orden.id, {"estado": "cancelada", "motivo": "x"})
-
-    assert r.status_code == 404
     await _sin_cambios(db, orden.id, EstadoOrdenEnum.APROBADA)

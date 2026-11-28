@@ -71,22 +71,19 @@ async def test_cuentas_no_activas(client, crear_usuario, estado, codigo):  # AC-
     assert "access_token" not in r.json()
 
 
-async def test_sancionado_vigente(client, crear_usuario):  # AC-17, EC-01
-    hasta = datetime.now(UTC) + timedelta(days=7)
+@pytest.mark.parametrize("dias", [7, None], ids=["vigente", "indefinida"])
+async def test_suspendido(client, crear_usuario, dias):  # AC-17, EC-01, EC-06
+    hasta = datetime.now(UTC) + timedelta(days=dias) if dias is not None else None
     u = await crear_usuario(estado=EstadoCuenta.SUSPENDIDO, suspendido_hasta=hasta)
     r = await _login(client, u.email)
     assert r.status_code == 403
     body = r.json()
     assert body["code"] == "CUENTA_SUSPENDIDA"
-    assert datetime.fromisoformat(body["suspendido_hasta"]) == hasta
+    if hasta is None:
+        assert body["suspendido_hasta"] is None
+    else:
+        assert datetime.fromisoformat(body["suspendido_hasta"]) == hasta
     assert "access_token" not in body
-
-
-async def test_suspension_indefinida(client, crear_usuario):  # EC-06
-    u = await crear_usuario(estado=EstadoCuenta.SUSPENDIDO)
-    r = await _login(client, u.email)
-    assert r.status_code == 403
-    assert r.json()["code"] == "CUENTA_SUSPENDIDA" and r.json()["suspendido_hasta"] is None
 
 
 async def test_fin_automatico_de_sancion(client, db, crear_usuario):  # AC-18, EC-05
@@ -120,12 +117,6 @@ class TestTokens:  # AC-19, EC-15, EC-16
     async def test_esquema_distinto_de_bearer(self, client):
         r = await client.get(ME, headers={"Authorization": "Basic YWJjOmRlZg=="})
         assert r.status_code == 401 and r.json()["code"] == "NO_AUTENTICADO"
-
-    async def test_token_alterado(self, client, crear_usuario):
-        u = await crear_usuario()
-        token = auth(u)["Authorization"] + "x"
-        r = await client.get(ME, headers={"Authorization": token})
-        assert r.status_code == 401 and r.json()["code"] == "TOKEN_INVALIDO"
 
     async def test_usuario_inexistente(self, client, db, crear_usuario):  # EC-16
         u = await crear_usuario()

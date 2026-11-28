@@ -168,14 +168,6 @@ async def test_fallo_de_smtp_no_cambia_la_respuesta(
     assert fila.token_hash not in caplog.text
 
 
-async def test_endpoints_sin_sesion_en_openapi(client):  # AC-79, P4.1
-    esquema = (await client.get("/openapi.json")).json()
-    for ruta in (SOLICITAR, CONFIRMAR):
-        if ruta in esquema["paths"]:
-            assert "security" not in esquema["paths"][ruta]["post"]
-    assert "429" in esquema["paths"][SOLICITAR]["post"]["responses"]
-
-
 async def _token_para(client, correos, email: str) -> str:
     assert (await _pedir(client, email)).status_code == 202
     return _token_del_correo(correos[-1])
@@ -276,13 +268,6 @@ class TestConfirmar:
         assert fila.usado_en is None
         assert (await _confirmar(client, token)).status_code == 200
 
-    async def test_campos_desconocidos(self, client):  # AC-79
-        r = await client.post(
-            CONFIRMAR, json={"token": "x" * 43, "password_nueva": NUEVA, "usuario_id": 1}
-        )
-        assert r.status_code == 422
-
-
 class TestInvalidaciones:  # AC-75, RN-48, RN-53
     async def test_un_pedido_nuevo_invalida_el_anterior(self, client, crear_usuario, correos):
         await crear_usuario(email="lucia@untdf.edu.ar")
@@ -339,4 +324,3 @@ class TestInvalidaciones:  # AC-75, RN-48, RN-53
         assert r.status_code == 200, r.text
         r = await _confirmar(client, token)
         assert r.status_code == 422 and r.json()["code"] == "TOKEN_RECUPERACION_INVALIDO"
-

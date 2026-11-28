@@ -10,7 +10,7 @@
 import itertools
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import datetime, timedelta, timezone 
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from dotenv import load_dotenv
@@ -55,15 +55,9 @@ from app.modules.loans.models import DetallePrestamo, OrdenPedido  # noqa: E402
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 PASSWORD = "Camara2026!"
 
-_TABLAS = (
-    "notificaciones, comunicados, "  # SPEC-06 (conformidad del Perfil 1, T-01)
-    "envios_correo_diarios, "  # SPEC-11 §6.7
-    "intentos_recuperacion, "  # SPEC-03 B1: sin FK, el CASCADE de `usuarios` no la vacía
-    "parametros_globales_historial, parametros_globales, usuarios_historial_estado, "
-    "reservas_espacios, bloqueos_espacios, espacios, ordenes_historial_estado, "
-    "detalles_prestamo, ordenes_pedido, "
-    "unidades_fisicas, equipamientos, categorias, usuarios"
-)
+# Todas las tablas de los modelos: una tabla nueva sin FK (como `intentos_recuperacion`
+# o `envios_correo_diarios`) no queda afuera del TRUNCATE por olvido.
+_TABLAS = ", ".join(tabla.name for tabla in Base.metadata.sorted_tables)
 
 
 @pytest.fixture(autouse=True)
@@ -231,8 +225,6 @@ def auth(usuario: Usuario) -> dict[str, str]:
 
 def dia(offset: int):
     """Fecha relativa a hoy en la zona del laboratorio."""
-    from datetime import timedelta
-
     from app.core.settings import ahora_lab
 
     return ahora_lab().date() + timedelta(days=offset)
@@ -291,21 +283,21 @@ def set_parametro(db: AsyncSession):
 
     return _set
 
-"""Fábricas de `loans` para los tests de integración (plan-05 §3).
- 
-Crean datos de `inventory` y líneas de préstamo directamente en la base. Los tests
-de `loans` pueden importar los modelos de otros módulos: la regla de aislamiento
-(Constitución P3.3) rige para el código de la aplicación, no para los tests.
-"""
- 
+
+# ── SPEC-05 · Fábricas de `loans` (plan-05 §3) ───────────────────────────────
+# Crean datos de `inventory` y líneas de préstamo directamente en la base. Los tests
+# de `loans` pueden importar los modelos de otros módulos: la regla de aislamiento
+# (Constitución P3.3) rige para el código de la aplicación, no para los tests.
+
+
 TZ = timezone(timedelta(hours=-3))  # zona del laboratorio (Ushuaia)
 _serie = itertools.count(1)
- 
- 
+
+
 @pytest.fixture
 def crear_equipamiento(db):
     """Fábrica: un ítem del catálogo con una unidad por cada estado indicado."""
- 
+
     async def _crear(
         *,
         nombre: str = "Cámara de prueba",
@@ -342,14 +334,14 @@ def crear_equipamiento(db):
         db.add(equipamiento)
         await db.commit()
         return equipamiento
- 
+
     return _crear
- 
- 
+
+
 @pytest.fixture
 def crear_linea(db, crear_usuario):
     """Fábrica: una orden con una línea sobre ``unidad`` en el estado indicado."""
- 
+
     async def _crear(
         equipamiento: Equipamiento,
         unidad: UnidadFisica,
@@ -381,5 +373,5 @@ def crear_linea(db, crear_usuario):
         db.add(orden)
         await db.commit()
         return orden
- 
+
     return _crear

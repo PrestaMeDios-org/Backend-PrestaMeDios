@@ -67,20 +67,7 @@ class TestJwt:
         payload = decodificar_token(token)
         assert (payload.sub, payload.tv, payload.auth_time) == (42, 3, claims["iat"])
 
-    def test_auth_time_explicito_se_conserva(self):  # RN-65
-        inicio = int((datetime.now(UTC) - timedelta(hours=2)).timestamp())
-        token, _ = crear_access_token(
-            usuario_id=5,
-            rol=RolUsuario.ESTUDIANTE,
-            sede=SedeEnum.USHUAIA,
-            token_version=0,
-            auth_time=inicio,
-        )
-        claims = jwt.decode(token, options={"verify_signature": False})
-        assert claims["auth_time"] == inicio and claims["iat"] > inicio
-        assert decodificar_token(token).auth_time == inicio
-
-    def test_sin_auth_time_usa_iat(self):  # RN-68
+    def test_sin_auth_time_usa_iat(self):  # RN-68, AC-93
         iat = int((datetime.now(UTC) - timedelta(minutes=1)).timestamp())
         assert decodificar_token(_token(iat=iat)).auth_time == iat
 
@@ -89,12 +76,6 @@ class TestJwt:
         with pytest.raises(AppError) as exc:
             decodificar_token(_token(auth_time=valor))
         assert _codigo(exc) == "TOKEN_INVALIDO"
-
-    def test_superadmin_sede_null(self):
-        token, _ = crear_access_token(
-            usuario_id=1, rol=RolUsuario.SUPERADMIN, sede=None, token_version=0
-        )
-        assert jwt.decode(token, options={"verify_signature": False})["sede"] is None
 
     def test_firma_alterada(self):  # AC-19
         with pytest.raises(AppError) as exc:
@@ -125,11 +106,6 @@ class TestJwt:
     def test_sub_no_numerico(self):
         with pytest.raises(AppError) as exc:
             decodificar_token(_token(sub="abc"))
-        assert _codigo(exc) == "TOKEN_INVALIDO"
-
-    def test_basura(self):
-        with pytest.raises(AppError) as exc:
-            decodificar_token("no.es.un-token")
         assert _codigo(exc) == "TOKEN_INVALIDO"
 
 

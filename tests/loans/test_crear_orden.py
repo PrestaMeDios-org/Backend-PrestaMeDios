@@ -143,20 +143,15 @@ async def test_un_solicitante_sin_sede_recibe_403_y_no_un_500():
 # ── Horario ──────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    ("retiro", "devolucion", "campo"),
-    [(_a(3, 8, 59), DEVOLUCION, "retiro"), (RETIRO, _a(5, 16, 1), "devolucion")],
-)
-async def test_fuera_de_la_franja_se_rechaza(
-    client, crear_usuario, equipo, retiro, devolucion, campo
-):  # AC-L07, RN-L04
+async def test_fuera_de_la_franja_se_rechaza(client, crear_usuario, equipo):
+    # AC-L07, RN-L04: un caso alcanza para el cableado; los bordes, en test_validaciones
     ana = await crear_usuario(ESTUDIANTE)
     camara = await equipo()
-    pedido = _pedido(camara, retiro=retiro, devolucion=devolucion)
+    pedido = _pedido(camara, retiro=_a(3, 8, 59))
     r = await client.post(URL, json=pedido, headers=auth(ana))
     assert r.status_code == 422
     assert r.json()["code"] == "FRANJA_FUERA_DE_HORARIO"
-    assert r.json()["campo"] == campo
+    assert r.json()["campo"] == "retiro"
 
 
 async def test_la_franja_es_la_de_la_sede_del_solicitante(

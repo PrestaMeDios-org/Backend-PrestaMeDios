@@ -22,22 +22,20 @@ DATOS = UsuarioAdminCreate(
 )
 
 
-async def test_crea_superadmin_activo_y_es_idempotente(db):
+async def test_crea_superadmin_activo_idempotente_y_puede_iniciar_sesion(client, db):
     usuario, creado = await crear_superadmin(db, DATOS)
     assert creado is True
     assert usuario.email == "natalia.ader@untdf.edu.ar"
     assert usuario.rol == RolUsuario.SUPERADMIN and usuario.sede is None
     assert usuario.estado == EstadoCuenta.ACTIVO
     assert usuario.password_hash.startswith("$argon2id$")
+    assert usuario.debe_cambiar_password is False  # SPEC-02 AC-48: el bootstrap no lo exige
 
     otra_vez, creado_2 = await crear_superadmin(db, DATOS)
     assert creado_2 is False and otra_vez.id == usuario.id
     assert await db.scalar(select(func.count()).select_from(Usuario)) == 1
     assert await db.scalar(select(func.count()).select_from(UsuarioHistorialEstado)) == 1
 
-
-async def test_superadmin_creado_puede_iniciar_sesion(client, db):
-    await crear_superadmin(db, DATOS)
     r = await client.post(
         "/api/v1/auth/login",
         json={"email": "natalia.ader@untdf.edu.ar", "password": "Laboratorio2026"},

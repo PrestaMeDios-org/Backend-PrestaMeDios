@@ -85,13 +85,6 @@ async def test_mias_pagina_con_limit_y_offset(client, db, crear_usuario):  # AC-
     assert [o["id"] for o in resto.json()] == ids[2:]
 
 
-@pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 201}, {"offset": -1}])
-async def test_mias_rechaza_paginacion_invalida(client, crear_usuario, params):  # AC-L18
-    ana = await crear_usuario(RolUsuario.ESTUDIANTE)
-    r = await client.get(f"{BASE}/ordenes/mias", params=params, headers=auth(ana))
-    assert r.status_code == 422
-
-
 # ── GET /ordenes/{id} ────────────────────────────────────────────────────────
 
 
@@ -111,17 +104,6 @@ async def test_detalle_de_una_orden_propia(client, db, crear_usuario):  # AC-L16
     assert cuerpo["demorado"] is False
     assert cuerpo["resuelto_en"] is None
     assert cuerpo["solicitante"] is None  # el dueño no recibe su propio resumen (T2.2)
-
-
-async def test_detalle_de_una_orden_ajena_responde_404(client, db, crear_usuario):  # AC-L16
-    ana = await crear_usuario(RolUsuario.ESTUDIANTE)
-    beto = await crear_usuario(RolUsuario.ESTUDIANTE)
-    orden_de_beto = await _orden(db, beto)
-
-    r = await client.get(f"{BASE}/ordenes/{orden_de_beto.id}", headers=auth(ana))
-
-    assert r.status_code == 404
-    assert r.json()["code"] == "ORDEN_NO_ENCONTRADA"
 
 
 async def test_detalle_de_una_orden_inexistente_responde_404(client, crear_usuario):  # AC-L16

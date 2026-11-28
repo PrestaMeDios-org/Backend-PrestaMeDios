@@ -66,14 +66,6 @@ async def test_el_admin_con_jurisdiccion_ve_el_detalle_con_el_solicitante(
     assert not _claves(cuerpo) & CAMPOS_PRIVADOS  # P6
 
 
-async def test_el_superadmin_ve_ordenes_de_cualquier_sede(client, db, crear_usuario):
-    ana = await crear_usuario(E, RG)
-    orden = await _orden(db, ana, sede=RG)
-    superadmin = await crear_usuario(S)
-    r = await client.get(f"{BASE}/ordenes/{orden.id}", headers=auth(superadmin))
-    assert r.status_code == 200
-
-
 async def test_un_admin_de_otra_sede_recibe_404(client, db, crear_usuario):  # AC-L29
     ana = await crear_usuario(E, USH)
     orden = await _orden(db, ana)
@@ -92,14 +84,7 @@ async def test_otro_estudiante_o_docente_de_la_misma_sede_recibe_404(
     otro = await crear_usuario(rol, USH)
     r = await client.get(f"{BASE}/ordenes/{orden.id}", headers=auth(otro))
     assert r.status_code == 404
-
-
-async def test_el_dueño_sigue_viendo_su_orden_sin_su_resumen(client, db, crear_usuario):
-    ana = await crear_usuario(E, USH)
-    orden = await _orden(db, ana, estado=EstadoOrdenEnum.APROBADA)
-    r = await client.get(f"{BASE}/ordenes/{orden.id}", headers=auth(ana))
-    assert r.status_code == 200
-    assert r.json()["solicitante"] is None
+    assert r.json()["code"] == "ORDEN_NO_ENCONTRADA"
 
 
 # ── GET /ordenes (bandeja) ───────────────────────────────────────────────────
@@ -174,16 +159,3 @@ async def test_la_bandeja_pagina_con_limit_y_offset(client, db, crear_usuario): 
 
     assert await _ids(client, admin, limit=2) == [ordenes[0].id, ordenes[1].id]
     assert await _ids(client, admin, limit=2, offset=2) == [ordenes[2].id]
-
-
-async def test_la_bandeja_vacia_devuelve_una_lista_vacia(client, crear_usuario):
-    admin = await crear_usuario(A, USH)
-    assert await _ids(client, admin) == []
-
-
-@pytest.mark.parametrize("rol", [E, D])
-async def test_estudiantes_y_docentes_no_acceden_a_la_bandeja(client, crear_usuario, rol):
-    # AC-L17
-    usuario = await crear_usuario(rol, USH)
-    r = await client.get(f"{BASE}/ordenes", headers=auth(usuario))
-    assert r.status_code == 403

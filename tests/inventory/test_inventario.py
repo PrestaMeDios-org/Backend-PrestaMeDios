@@ -36,8 +36,7 @@ async def catalogo(db):
     nuevo = Equipamiento(codigo="MIC-1", nombre="Micrófono", marca="Rode", modelo="NTG", categoria_id="cameras")
     db.add_all([camara, tripode, nuevo])
     await db.commit()
-    return {"camara": camara.id, "tripode": tripode.id, "nuevo": nuevo.id,
-            "unidad_rg": camara.unidades[1].id}
+    return {"camara": camara.id, "tripode": tripode.id, "nuevo": nuevo.id}
 
 
 @pytest.mark.parametrize(
@@ -45,48 +44,20 @@ async def catalogo(db):
     [("get", "/categorias"), ("post", "/categorias"), ("get", "/equipamiento"),
      ("get", "/equipamiento/1"), ("post", "/equipamiento"), ("post", "/equipamiento/1/unidades"),
      ("get", "/unidades"), ("patch", "/unidades/1/estado"), ("patch", "/unidades/1"),
-     ("patch", "/equipamiento/1"), ("patch", "/equipamiento/1/estado")],
+     ("patch", "/equipamiento/1"), ("patch", "/equipamiento/1/estado"),
+     ("get", "/equipamiento/1/disponibilidad?desde=2099-01-01&hasta=2099-01-02")],
 )
-async def test_exige_sesion(client, db, metodo, ruta):  # AC-40, INV-01
+async def test_exige_sesion(client, db, metodo, ruta):  # AC-40, INV-01, INV-30
     r = await getattr(client, metodo)(f"{B}{ruta}", **({"json": {}} if metodo != "get" else {}))
     assert r.status_code == 401
 
 
+# El alcance de lectura de estudiantes, docentes y superadmin lo cubre `test_catalogo.py` (INV-02, 03, 07).
 class TestAlcanceDeLectura:  # AC-41
-    async def test_estudiante_ve_solo_su_sede(self, client, catalogo, crear_usuario):
-        est = await crear_usuario(R.ESTUDIANTE, USH)
-        items = (await client.get(f"{B}/equipamiento", headers=auth(est))).json()
-        assert [i["nombre"] for i in items] == ["Cámara"]
-        assert "unidades" not in items[0]  # INV-05 (SPEC-04 D-04): vista reducida
-        assert items[0]["cantidad_total"] == 1
-
     async def test_admin_ve_items_sin_unidades(self, client, catalogo, crear_usuario):
         admin = await crear_usuario(R.ADMIN_LOCAL, USH)
         nombres = {i["nombre"] for i in (await client.get(f"{B}/equipamiento", headers=auth(admin))).json()}
         assert nombres == {"Cámara", "Micrófono"}
-
-    async def test_superadmin_y_filtro_por_sede(self, client, catalogo, crear_usuario):
-        sa = await crear_usuario(R.SUPERADMIN)
-        todos = (await client.get(f"{B}/equipamiento", headers=auth(sa))).json()
-        assert {i["nombre"] for i in todos} == {"Cámara", "Trípode", "Micrófono"}
-        rg = (await client.get(f"{B}/equipamiento", params={"sede": "Río Grande"}, headers=auth(sa))).json()
-        camara = next(i for i in rg if i["nombre"] == "Cámara")
-        assert [u["sede"] for u in camara["unidades"]] == ["Río Grande"]
-
-    async def test_otra_sede_y_unidades(self, client, catalogo, crear_usuario):
-        est = await crear_usuario(R.ESTUDIANTE, USH)
-        r = await client.get(f"{B}/equipamiento", params={"sede": "Río Grande"}, headers=auth(est))
-        assert r.status_code == 403 and r.json()["code"] == "SEDE_FUERA_DE_ALCANCE"
-        r = await client.get(f"{B}/unidades", headers=auth(est))
-        assert r.status_code == 403 and r.json()["code"] == "PERMISO_INSUFICIENTE"
-
-    async def test_detalle(self, client, catalogo, crear_usuario):
-        est = await crear_usuario(R.ESTUDIANTE, USH)
-        r = await client.get(f"{B}/equipamiento/{catalogo['tripode']}", headers=auth(est))
-        assert r.status_code == 404 and r.json()["code"] == "EQUIPAMIENTO_NO_ENCONTRADO"
-        r = await client.get(f"{B}/equipamiento/{catalogo['camara']}", headers=auth(est))
-        assert r.status_code == 200 and "unidades" not in r.json()  # INV-05 (D-04)
-        assert r.json()["cantidad_total"] == 1
 
     async def test_stock_de_admin_local(self, client, catalogo, crear_usuario):
         admin = await crear_usuario(R.ADMIN_LOCAL, RG)
@@ -124,17 +95,7 @@ class TestAltas:  # AC-42, AC-44, AC-45
         )
         assert r.status_code == 201 and r.json()["sede"] == "Ushuaia"
 
-    async def test_plazo_por_defecto_desde_config(self, client, db, crear_usuario, set_parametro):
-        db.add(Categoria(id="cameras", nombre="Cámaras"))
-        await db.commit()
-        await set_parametro("prestamo.general.max_dias", 3)
-        admin = await crear_usuario(R.ADMIN_LOCAL, USH)
-        r = await client.post(f"{B}/equipamiento", json=EQUIPO, headers=auth(admin))
-        assert r.status_code == 201 and r.json()["max_dias_prestamo"] == 3
-        r = await client.post(
-            f"{B}/equipamiento", json={**EQUIPO, "codigo": "CAM-2", "max_dias_prestamo": 7}, headers=auth(admin)
-        )
-        assert r.json()["max_dias_prestamo"] == 7
+    # El plazo por defecto (AC-44) lo cubre `test_gestion.py::test_plazo_de_notebooks_desde_config` (INV-13).
 
     async def test_errores_homogeneos(self, client, catalogo, crear_usuario):
         admin = await crear_usuario(R.ADMIN_LOCAL, USH)
@@ -153,29 +114,6 @@ class TestAltas:  # AC-42, AC-44, AC-45
         )
         assert r.status_code == 404 and r.json()["code"] == "EQUIPAMIENTO_NO_ENCONTRADO"
 
-    @pytest.mark.parametrize("rol", [R.ESTUDIANTE, R.DOCENTE])
-    async def test_no_admins_no_escriben(self, client, db, crear_usuario, rol):
-        u = await crear_usuario(rol, USH)
-        r = await client.post(f"{B}/categorias", json={"id": "x", "nombre": "X"}, headers=auth(u))
-        assert r.status_code == 403
 
-
-class TestEstadoDeUnidades:  # AC-43
-    async def test_alcance(self, client, catalogo, crear_usuario):
-        admin_ush = await crear_usuario(R.ADMIN_LOCAL, USH)
-        r = await client.patch(
-            f"{B}/unidades/{catalogo['unidad_rg']}/estado", json={"estado": "mantenimiento"}, headers=auth(admin_ush)
-        )
-        assert r.status_code == 404 and r.json()["code"] == "UNIDAD_NO_ENCONTRADA"
-        admin_rg = await crear_usuario(R.ADMIN_LOCAL, RG)
-        r = await client.patch(
-            f"{B}/unidades/{catalogo['unidad_rg']}/estado", json={"estado": "mantenimiento"}, headers=auth(admin_rg)
-        )
-        assert r.status_code == 200 and r.json()["estado"] == "mantenimiento"
-
-    async def test_docente_no_cambia_estado(self, client, catalogo, crear_usuario):
-        doc = await crear_usuario(R.DOCENTE, RG)
-        r = await client.patch(
-            f"{B}/unidades/{catalogo['unidad_rg']}/estado", json={"estado": "mantenimiento"}, headers=auth(doc)
-        )
-        assert r.status_code == 403 and r.json()["code"] == "PERMISO_INSUFICIENTE"
+# AC-43 (roles y alcance en el cambio de estado de unidades) lo cubre `test_gestion.py`:
+# `test_no_admins_no_gestionan` (INV-11) y `test_unidad_de_otra_sede` (INV-20).

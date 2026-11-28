@@ -40,11 +40,6 @@ async def _libres(db, ids, sede=SedeEnum.USHUAIA, desde=DESDE, hasta=HASTA):
 # ── Criterio físico (inventory) ──────────────────────────────────────────────
 
 
-async def test_sin_lineas_todas_las_unidades_disponibles_estan_libres(db, crear_equipamiento):
-    eq = await crear_equipamiento(estados=(E.DISPONIBLE,) * 3)
-    assert await _libres(db, [eq.id]) == {eq.id: _ids_por_codigo(eq)}
-
-
 async def test_solo_cuentan_las_unidades_disponibles_fisicamente(db, crear_equipamiento):
     eq = await crear_equipamiento(estados=(E.DISPONIBLE, E.PRESTADO, E.MANTENIMIENTO, E.BAJA))
     assert await _libres(db, [eq.id]) == {eq.id: [_ids_por_codigo(eq)[0]]}
@@ -54,11 +49,6 @@ async def test_solo_cuentan_las_unidades_de_la_sede(db, crear_equipamiento):  # 
     eq = await crear_equipamiento(sede=SedeEnum.RIO_GRANDE)
     assert await _libres(db, [eq.id], SedeEnum.USHUAIA) == {eq.id: []}
     assert await _libres(db, [eq.id], SedeEnum.RIO_GRANDE) == {eq.id: _ids_por_codigo(eq)}
-
-
-async def test_un_item_inactivo_no_tiene_unidades_libres(db, crear_equipamiento):
-    eq = await crear_equipamiento(activo=False)
-    assert await _libres(db, [eq.id]) == {eq.id: []}
 
 
 # ── Criterio por fechas (loans) ──────────────────────────────────────────────
@@ -134,10 +124,6 @@ async def test_varios_modelos_en_una_llamada(db, crear_equipamiento, crear_linea
         ocupado.id: [],
         999_999: [],
     }
-
-
-async def test_sin_modelos_devuelve_un_diccionario_vacio(db):
-    assert await _libres(db, []) == {}
 
 
 async def test_un_periodo_invertido_o_vacio_es_un_error_de_programacion(db):

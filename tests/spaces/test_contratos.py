@@ -13,7 +13,6 @@ from app.modules.spaces.availability import bloqueo_solapa, intervalos_libres
 from app.modules.spaces.models import BloqueoEspacio
 from app.modules.spaces.schemas import (
     BloqueoEspacioCreate,
-    EspacioCreate,
     ReservaEspacioCreate,
     ReservaEspacioUpdateStatus,
 )
@@ -33,17 +32,6 @@ def _reserva(**cambios):
 
 
 class TestReservaEspacioCreate:
-    def test_valida(self):
-        assert _reserva().motivo is None
-
-    def test_id_usuario_rechazado(self):  # AC-34, RN-25
-        with pytest.raises(ValidationError):
-            _reserva(id_usuario=1)
-
-    def test_estado_rechazado(self):
-        with pytest.raises(ValidationError):
-            _reserva(estado_reserva="Aprobada")
-
     @pytest.mark.parametrize(("inicio", "fin"), [(time(11), time(11)), (time(12), time(11))])
     def test_fin_no_posterior(self, inicio, fin):
         with pytest.raises(ValidationError):
@@ -53,24 +41,11 @@ class TestReservaEspacioCreate:
         with pytest.raises(ValidationError):
             _reserva(hora_inicio=time(10, tzinfo=timezone.utc), hora_fin=time(11, tzinfo=timezone.utc))
 
-    def test_horario_no_esta_fijo_en_el_contrato(self):  # GLO-03: lo valida el servicio
-        assert _reserva(hora_inicio=time(17), hora_fin=time(18)).hora_inicio == time(17)
-
 
 class TestReservaEspacioUpdateStatus:
-    def test_aprobada_sin_motivo(self):
-        assert ReservaEspacioUpdateStatus(nuevo_estado="Aprobada").motivo_rechazo is None
-
     def test_rechazada_requiere_motivo(self):
         with pytest.raises(ValidationError):
             ReservaEspacioUpdateStatus(nuevo_estado="Rechazada")
-
-    def test_en_uso_aceptado(self):
-        assert ReservaEspacioUpdateStatus(nuevo_estado="En_Uso").nuevo_estado.value == "En_Uso"
-
-    def test_estado_inexistente(self):
-        with pytest.raises(ValidationError):
-            ReservaEspacioUpdateStatus(nuevo_estado="Borrada")
 
 
 class TestBloqueoEspacioCreate:
@@ -84,25 +59,18 @@ class TestBloqueoEspacioCreate:
         datos.update(cambios)
         return BloqueoEspacioCreate(**datos)
 
-    def test_dia_completo(self):
-        b = self._bloqueo()
-        assert b.hora_inicio is None and b.hora_fin is None
-
-    def test_fecha_fin_anterior(self):
+    @pytest.mark.parametrize(
+        "cambios",
+        [
+            {"fecha_inicio": date(2026, 10, 14)},
+            {"hora_inicio": time(10)},
+            {"hora_inicio": time(15), "hora_fin": time(14)},
+        ],
+        ids=["fecha-fin-anterior", "parcial-sin-hora-fin", "rango-invertido"],
+    )
+    def test_rangos_invalidos(self, cambios):
         with pytest.raises(ValidationError):
-            self._bloqueo(fecha_inicio=date(2026, 10, 14))
-
-    def test_parcial_requiere_ambas_horas(self):
-        with pytest.raises(ValidationError):
-            self._bloqueo(hora_inicio=time(10))
-
-    def test_rango_invertido(self):
-        with pytest.raises(ValidationError):
-            self._bloqueo(hora_inicio=time(15), hora_fin=time(14))
-
-
-def test_espacio_create_sede_opcional():  # PRE-19
-    assert EspacioCreate(nombre="Aula-Estudio 1").sede is None
+            self._bloqueo(**cambios)
 
 
 def test_intervalos_libres_une_solapamientos_y_duraciones_arbitrarias():

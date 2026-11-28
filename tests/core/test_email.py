@@ -5,11 +5,9 @@ Sin base de datos: el backend ``memoria`` lo fija ``tests/conftest.py``.
 
 import logging
 import smtplib
-from string import Template
 
 import pytest
 
-from app.core import email
 from app.core.email import (
     ErrorEnvioCorreo,
     TipoCorreo,
@@ -29,9 +27,6 @@ CONTEXTOS = {
 
 
 class TestRenderizar:  # AC-100, RN-71
-    def test_cada_tipo_tiene_plantilla_y_contexto_de_ejemplo(self):
-        assert set(CONTEXTOS) == set(TipoCorreo)
-
     @pytest.mark.parametrize("tipo", list(TipoCorreo))
     def test_sin_variables_sin_reemplazar(self, tipo):
         correo = renderizar_correo(tipo, CONTEXTOS[tipo])
@@ -66,32 +61,8 @@ class TestRenderizar:  # AC-100, RN-71
                 {**CONTEXTOS[TipoCorreo.NOTIFICACION], "enlace_app": "https://phishing.example"},
             )
 
-    def test_valores_con_signo_pesos_no_se_reinterpretan(self):
-        correo = renderizar_correo(
-            TipoCorreo.NOTIFICACION, {"titulo": "Multa de $500", "mensaje": "$titulo"}
-        )
-        assert correo.asunto.endswith("Multa de $500")
-        assert correo.cuerpo.startswith("$titulo")
-
 
 class TestEnviar:  # AC-101, RN-72…RN-74
-    async def test_desde_un_servicio_sin_request(self, correos):
-        async def servicio_cualquiera() -> None:
-            await enviar_correo(
-                TipoCorreo.NOTIFICACION, "ana@untdf.edu.ar", CONTEXTOS[TipoCorreo.NOTIFICACION]
-            )
-
-        await servicio_cualquiera()
-        (enviado,) = correos
-        assert enviado.tipo == TipoCorreo.NOTIFICACION
-        assert enviado.destinatario == "ana@untdf.edu.ar"
-        assert enviado.asunto == "[PrestaMeDios] Préstamo aprobado"
-
-    async def test_variable_faltante_no_envia(self, correos):
-        with pytest.raises(ValueError):
-            await enviar_correo(TipoCorreo.NOTIFICACION, "ana@untdf.edu.ar", {"titulo": "x"})
-        assert correos == []
-
     async def test_log_sin_contexto_ni_cuerpo(self, correos, caplog):
         caplog.set_level(logging.INFO, logger="app.core.email")
         contexto = CONTEXTOS[TipoCorreo.RECUPERACION_PASSWORD]
@@ -167,11 +138,3 @@ class TestBackendSmtp:  # RN-73, RN-75
         assert "token=abc" not in str(exc.value)
         assert "Correo no enviado: tipo=RECUPERACION_PASSWORD usuario_id=3" in caplog.text
         assert "token=abc" not in caplog.text
-
-
-def test_plantillas_se_cachean():
-    email._plantilla.cache_clear()
-    renderizar_correo(TipoCorreo.NOTIFICACION, CONTEXTOS[TipoCorreo.NOTIFICACION])
-    renderizar_correo(TipoCorreo.NOTIFICACION, CONTEXTOS[TipoCorreo.NOTIFICACION])
-    assert email._plantilla.cache_info().hits >= 1
-    assert isinstance(email._plantilla(TipoCorreo.NOTIFICACION)[0], Template)

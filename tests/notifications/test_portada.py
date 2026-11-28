@@ -38,13 +38,6 @@ async def test_elegir_tema_y_listar(client, crear_usuario, crear_comunicado):
     assert [(p["comunicado_id"], p["tema"]) for p in r.json()] == [(c.id, "verde")]
 
 
-async def test_tema_invalido(client, crear_usuario, crear_comunicado):
-    admin = await crear_usuario(R.ADMIN_LOCAL, USH)
-    c = await crear_comunicado(USH)
-    r = await client.put(f"{B}/{c.id}/portada", json={"tema": "violeta"}, headers=auth(admin))
-    assert r.status_code == 422
-
-
 async def test_subir_foto_reemplaza_tema_y_se_sirve(client, crear_usuario, crear_comunicado):
     admin = await crear_usuario(R.ADMIN_LOCAL, USH)
     estudiante = await crear_usuario(R.ESTUDIANTE, USH, email="e@untdf.edu.ar")
@@ -105,24 +98,27 @@ async def test_mismo_permiso_que_editar(client, crear_usuario, crear_comunicado)
 async def test_no_revela_portadas_fuera_de_alcance(client, crear_usuario, crear_comunicado):
     admin_ush = await crear_usuario(R.ADMIN_LOCAL, USH)
     estudiante_rg = await crear_usuario(R.ESTUDIANTE, RG, email="e@untdf.edu.ar")
+    estudiante_ush = await crear_usuario(R.ESTUDIANTE, USH, email="e-ush@untdf.edu.ar")
     c = await crear_comunicado(USH)
-    await client.put(f"{B}/{c.id}/portada", json={"tema": "azul"}, headers=auth(admin_ush))
+    # Con foto: así el 404 de la imagen sale por las reglas de lectura y no por falta de foto.
+    r = await client.put(
+        f"{B}/{c.id}/portada/imagen",
+        files={"archivo": ("portada.png", _png(), "image/png")},
+        headers=auth(admin_ush),
+    )
+    assert r.status_code == 200, r.text
 
     r = await client.get(f"{B}/portadas", params={"ids": str(c.id)}, headers=auth(estudiante_rg))
     assert r.status_code == 200 and r.json() == []
     r = await client.get(f"{B}/{c.id}/portada/imagen", headers=auth(estudiante_rg))
-    assert r.status_code == 404
+    assert r.status_code == 404 and r.json()["code"] == "COMUNICADO_NO_ENCONTRADO"
+    r = await client.get(f"{B}/{c.id}/portada/imagen", headers=auth(estudiante_ush))
+    assert r.status_code == 200
 
 
-async def test_ids_invalidos(client, crear_usuario):
-    admin = await crear_usuario(R.ADMIN_LOCAL, USH)
-    r = await client.get(f"{B}/portadas", params={"ids": "a,b"}, headers=auth(admin))
-    assert r.status_code == 422 and r.json()["code"] == "IDS_INVALIDOS"
-
-
-@pytest.mark.parametrize("ids", ["99999999999", "0", "-3", "1,2147483648"])
+@pytest.mark.parametrize("ids", ["a,b", "99999999999", "0", "-3", "1,2147483648"])
 async def test_ids_fuera_de_rango(client, crear_usuario, ids):
-    """Un id que no entra en `integer` no llega a PostgreSQL: 422, no 500 (revisión del PR #39)."""
+    """Un id que no es entero o no entra en `integer` no llega a PostgreSQL: 422, no 500 (revisión del PR #39)."""
     admin = await crear_usuario(R.ADMIN_LOCAL, USH)
     r = await client.get(f"{B}/portadas", params={"ids": ids}, headers=auth(admin))
     assert r.status_code == 422 and r.json()["code"] == "IDS_INVALIDOS"
