@@ -3,7 +3,8 @@
 - Todos exigen sesión (P4.1).
 - Comunicados (NOV-02): lectura para todos los roles según su alcance de sede
   (RN-N3); publicación, edición y archivo sólo para administradores (RN-N2, RN-N5).
-- Notificaciones personales (NOV-04): se agregan en la Fase B.
+- Notificaciones personales (NOV-04): cada usuario ve y marca sólo las propias (RN-N6).
+  No hay `POST /notificaciones`: se crean desde el código de servicio (§6).
 """
 
 from fastapi import APIRouter, Depends, Query, status
@@ -20,6 +21,10 @@ from app.modules.notifications.schemas import (
     ComunicadoResponse,
     ComunicadosPage,
     ComunicadoUpdate,
+    LeerTodasResponse,
+    NotificacionesPage,
+    NotificacionResponse,
+    ResumenNotificaciones,
 )
 from app.modules.users.models import Usuario
 
@@ -138,3 +143,77 @@ async def cambiar_estado_comunicado(
     )
     await db.commit()
     return await _una(db, comunicado)
+
+
+# ── Notificaciones personales (NOV-04) ───────────────────────────────────────
+
+
+@router.get(
+    "/notificaciones",
+    response_model=NotificacionesPage,
+    summary="Listar mis notificaciones",
+    description=(
+        "Sólo las del usuario de la sesión. Primero las críticas sin leer; después el resto, "
+        "de la más nueva a la más vieja."
+    ),
+    responses=error_responses(401, 422),
+)
+async def listar_notificaciones(
+    solo_no_leidas: bool = Query(False, description="Sólo las que no se leyeron."),
+    limit: int = _LIMIT,
+    offset: int = _OFFSET,
+    usuario: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> NotificacionesPage:
+    items, total = await service.listar_notificaciones(
+        db, usuario, solo_no_leidas=solo_no_leidas, limit=limit, offset=offset
+    )
+    return NotificacionesPage(items=[service.notificacion_a_respuesta(n) for n in items], total=total)
+
+
+@router.get(
+    "/notificaciones/resumen",
+    response_model=ResumenNotificaciones,
+    summary="Cantidad de notificaciones sin leer",
+    description="Lo consulta la campanita cada 60 segundos (D-N04).",
+    responses=error_responses(401),
+)
+async def resumen_notificaciones(
+    usuario: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ResumenNotificaciones:
+    no_leidas, criticas = await service.resumen_notificaciones(db, usuario)
+    return ResumenNotificaciones(no_leidas=no_leidas, criticas_no_leidas=criticas)
+
+
+@router.patch(
+    "/notificaciones/{notificacion_id}/leida",
+    response_model=NotificacionResponse,
+    summary="Marcar una notificación como leída",
+    description="Idempotente: si ya estaba leída, conserva la fecha de la primera lectura.",
+    responses=error_responses(401, 404, 422),
+)
+async def marcar_leida(
+    notificacion_id: int,
+    usuario: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> NotificacionResponse:
+    notificacion = await service.marcar_leida(db, usuario, notificacion_id)
+    await db.commit()
+    return service.notificacion_a_respuesta(notificacion)
+
+
+@router.post(
+    "/notificaciones/leer-todas",
+    response_model=LeerTodasResponse,
+    summary="Marcar todas como leídas",
+    description="Marca las de severidad NORMAL. Las críticas se marcan de a una (RN-N9).",
+    responses=error_responses(401),
+)
+async def leer_todas(
+    usuario: Usuario = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> LeerTodasResponse:
+    marcadas = await service.leer_todas(db, usuario)
+    await db.commit()
+    return LeerTodasResponse(marcadas=marcadas)

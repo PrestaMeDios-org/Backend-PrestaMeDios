@@ -42,7 +42,7 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 | `inventory` | `/api/v1/inventory` | PRE-01, PRE-02, PRE-12, PRE-14, PRE-19 | Implementado |
 | `spaces` | `/api/v1/spaces` | RES-01…RES-05, GLO-02, GLO-04 | Implementado |
 | `loans` | `/api/v1/loans` | PRE-03…PRE-11, PRE-13, PRE-15…PRE-18, PRE-20 | Sólo contratos: los endpoints exigen sesión y responden `501 NO_IMPLEMENTADO` |
-| `notifications` | `/api/v1/notifications` | NOV-01, NOV-02, NOV-04 (NOV-03 diferido) | Comunicados implementados (SPEC-06 Fase A); notificaciones personales en la Fase B |
+| `notifications` | `/api/v1/notifications` | NOV-01, NOV-02, NOV-04 (NOV-03 diferido) | Comunicados con portada elegible (SPEC-06 Fase A y §15) y notificaciones personales con la campanita (Fase B). Falta la Fase C: correo y avisos de vencimiento |
 | `assistant` | — | IA-01…IA-03 | Pendiente |
 
 **Roles:** `SUPERADMIN` (ambas sedes) · `ADMIN_LOCAL` (una sede) · `DOCENTE` · `ESTUDIANTE`. Los usuarios sólo operan sobre los recursos de su sede, excepto el Superadministrador.
@@ -50,6 +50,22 @@ Las invariantes críticas se garantizan en PostgreSQL: unicidad, `CHECK`, claves
 **Seguridad transversal.** Todos los endpoints, salvo registro, login, recuperación de contraseña, `/health` y `/health/db`, requieren sesión. El solicitante de una reserva es siempre el usuario autenticado; los recursos creados por un administrador local reciben su sede automáticamente; un recurso de otra sede se responde como inexistente (`404`). Las cuentas creadas o restablecidas por un administrador deben cambiar la contraseña antes de operar (`403 CAMBIO_PASSWORD_REQUERIDO`). Ninguna respuesta de `/api/` se guarda en caché: llevan `Cache-Control: no-store`, para que el navegador no le muestre a una pestaña los datos de otro usuario (SPEC-12).
 
 **API pública de `users` para otros módulos.** `app.modules.users.service.datos_publicos_por_ids(db, ids)` devuelve `{id: DatosPublicosUsuario(id, nombre, apellido)}` en una sola consulta, para mostrar al solicitante en `spaces` y `loans` sin importar el modelo `Usuario` (SPEC-03 Fase A). No filtra por sede ni por estado: quien la llama sólo pasa ids que ya puede mostrar, y nunca la usa para exponer identidades en la disponibilidad.
+
+**API pública de `notifications` para otros módulos (SPEC-06 §6).** `loans` y `spaces` avisan a un usuario con `await crear_notificacion(db, usuario_id, TipoNotificacion.<TIPO>, datos, referencia=ReferenciaNotificacion(modulo="loans", id=orden.id))`, o a varios con `crear_notificaciones(db, ids, …)`. Las dos agregan la notificación a la transacción de quien llama y **no hacen `commit`**: si el llamador deshace su cambio, el aviso también se deshace. `datos` lleva exactamente las claves de la plantilla del tipo (`app/modules/notifications/plantillas.py`), como texto y con las fechas ya formateadas; si falta o sobra una clave, lanza `ValueError` antes de guardar nada.
+
+```python
+from app.modules.notifications.enums import TipoNotificacion
+from app.modules.notifications.schemas import ReferenciaNotificacion
+from app.modules.notifications.service import crear_notificacion
+
+await crear_notificacion(
+    db,
+    orden.solicitante_id,
+    TipoNotificacion.ORDEN_HORARIO_AJUSTADO,
+    {"numero_orden": str(orden.id), "retiro": "12/11 10:00", "devolucion": "14/11 15:00"},
+    referencia=ReferenciaNotificacion(modulo="loans", id=orden.id),
+)
+```
 
 **API pública de `inventory` para otros módulos** (`app/modules/inventory/service.py`, SPEC-04 §6). Ninguna función hace `commit`: la transacción es de quien llama. `unidades_asignables` y `unidad_es_asignable` (unidades `disponible` de la sede, de un ítem activo); `marcar_unidad_prestada`, `liberar_unidad` y `marcar_unidad_mantenimiento` (entrega, devolución y devolución con daño; se pueden encadenar en una transacción); `bloquear_unidad` (`SELECT … FOR UPDATE`; quien llama sólo lee la unidad, y bloquea varias en orden ascendente de id), y `datos_equipamiento_por_ids` (plazo, alta gama y nombre por lote). `inventory/service.py` no importa `loans`: sólo `inventory/disponibilidad.py` usa `loans.ocupacion_de_unidades`.
 
@@ -240,6 +256,10 @@ Resumen; el detalle de cada contrato, ejemplo y código de error está en `/docs
 | Comunicados | `GET /api/v1/notifications/comunicados[/{id}]` | Comunicados de la sede del usuario más los globales. Estudiantes y docentes ven sólo los vigentes; `sede` sólo para el Superadministrador e `incluir_archivados` sólo para administradores |
 | | `POST /api/v1/notifications/comunicados` | Publicar. `ADMIN_LOCAL`: en su sede. `SUPERADMIN`: `sede` o `es_global` (uno de los dos) |
 | | `PATCH /api/v1/notifications/comunicados/{id}` · `PATCH …/{id}/estado` | Editar título, contenido y vencimiento; archivar o reactivar |
+| | `GET /api/v1/notifications/comunicados/portadas` · `PUT/DELETE …/{id}/portada` · `PUT/GET …/{id}/portada/imagen` | Portada del comunicado: tema de color o foto (SPEC-06 §15) |
+| Notificaciones | `GET /api/v1/notifications/notificaciones` | Las del usuario de la sesión, con las críticas sin leer primero; `solo_no_leidas`, `limit`, `offset` |
+| | `GET /api/v1/notifications/notificaciones/resumen` | `{no_leidas, criticas_no_leidas}`, para la campanita |
+| | `PATCH /api/v1/notifications/notificaciones/{id}/leida` · `POST …/leer-todas` | Marcar una (idempotente) o todas las normales; las críticas se marcan de a una |
 | Salud | `GET /health` · `GET /health/db` | Vida del proceso · la base responde (`200` u `503 {"status": "sin_base"}`); públicos, para el monitoreo |
 
 ---

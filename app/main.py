@@ -23,7 +23,7 @@ from app.modules.files.router import router as files_router
 from app.modules.inventory.router import router as inventory_router
 from app.modules.loans.router import router as loans_router
 from app.modules.notifications.router import router as notifications_router
-from app.modules.notifications.portada import router as portada_router  # MOMENTÁNEO (SPEC-10 M-02)
+from app.modules.notifications.portada import router as portada_router
 from app.modules.spaces.router import router as spaces_router
 from app.modules.users.router import auth_router, users_router
 
@@ -111,7 +111,7 @@ app.include_router(
     tags=["Préstamos y Solicitudes"],
 )
 
-# MOMENTÁNEO (SPEC-10 M-02): antes que `notifications_router`, para que
+# Portada de los comunicados (SPEC-06 §15): antes que `notifications_router`, para que
 # `/comunicados/portadas` no lo tome `/comunicados/{comunicado_id}`.
 app.include_router(
     portada_router,

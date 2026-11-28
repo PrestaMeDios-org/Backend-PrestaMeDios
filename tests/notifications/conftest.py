@@ -46,3 +46,29 @@ def crear_comunicado(db):
         return comunicado
 
     return _crear
+
+
+def datos_de_ejemplo(tipo) -> dict[str, str]:
+    """``datos`` válidos para ``tipo``: cada clave de su plantilla con un valor de prueba."""
+    from app.modules.notifications.plantillas import PLANTILLAS
+
+    return {clave: f"<{clave}>" for clave in sorted(PLANTILLAS[tipo].claves)}
+
+
+@pytest.fixture
+def notificar(db):
+    """Fábrica (Fase B): crea una notificación con el contrato público y la confirma.
+
+    Cada llamada es una transacción propia, así `creada_en` (``now()``) crece.
+    """
+    from app.modules.notifications.enums import TipoNotificacion
+    from app.modules.notifications.service import crear_notificacion
+
+    async def _notificar(usuario, tipo=TipoNotificacion.ORDEN_APROBADA, **kwargs):
+        notificacion = await crear_notificacion(
+            db, usuario._cache_auth["id"], tipo, datos_de_ejemplo(tipo), **kwargs
+        )
+        await db.commit()
+        return notificacion
+
+    return _notificar

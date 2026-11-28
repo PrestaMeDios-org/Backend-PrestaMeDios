@@ -1,8 +1,7 @@
-"""MOMENTÁNEO (SPEC-10 M-02): portada elegible de los comunicados
+"""notifications: portada elegible de los comunicados (SPEC-10 M-02, adoptada en SPEC-06 §15)
 
-Tabla aislada ``comunicados_portada``: una fila por comunicado con tema de color o
-foto elegidos. No modifica ``comunicados`` ni ``files``. El ``downgrade`` borra sólo
-esta tabla: es la forma de sacar la funcionalidad (SPEC-10 §1.4).
+Tabla ``comunicados_portada``: una fila por comunicado con tema de color o foto
+elegidos. No modifica ``comunicados`` ni ``files``. El ``downgrade`` borra sólo esta tabla.
 
 Revision ID: 0020_notifications_portada
 Revises: 0019_inventory_categorias_base

@@ -1,13 +1,10 @@
-"""MOMENTÁNEO (SPEC-10 M-02, §4.7): portada elegible de los comunicados.
+"""Portada elegible de los comunicados (NOV-02, SPEC-06 §15, ADR-028).
 
 Quien puede editar un comunicado elige uno de cuatro temas de color o sube una foto;
-sin portada, el frontend asigna el color automáticamente. **No tiene requisito en el
-ERS** (NOV-02 no habla de imágenes): está aislado a propósito para poder sacarlo.
-
-Para sacarlo: ``alembic downgrade`` de ``0020_notifications_portada`` (borra sólo la
-tabla ``comunicados_portada``), borrar este archivo y ``tests/notifications/test_portada.py``,
-y las líneas marcadas con ``MOMENTÁNEO (SPEC-10 M-02)`` en ``app/main.py`` y ``alembic/env.py``.
-No modifica ``comunicados``, sus esquemas ni el módulo ``files``.
+sin portada, el frontend asigna el color automáticamente. Nació como MOMENTÁNEA en
+SPEC-10 (M-02, §4.7) y el Perfil 5 la adoptó tal cual el 2026-11-27: el contrato es el
+de SPEC-10 §4.7. Tabla propia ``comunicados_portada`` (migración ``0020``); no modifica
+``comunicados``, sus esquemas ni el módulo ``files``.
 """
 
 import asyncio
@@ -173,7 +170,7 @@ _admins = require_roles(RolUsuario.SUPERADMIN, RolUsuario.ADMIN_LOCAL)
 @router.get(
     "/comunicados/portadas",
     response_model=list[PortadaResponse],
-    summary="Portadas elegidas de varios comunicados (MOMENTÁNEO, SPEC-10 M-02)",
+    summary="Portadas elegidas de varios comunicados",
     responses=error_responses(401, 422),
 )
 async def listar_portadas(
@@ -218,7 +215,7 @@ async def listar_portadas(
 @router.put(
     "/comunicados/{comunicado_id}/portada",
     response_model=PortadaResponse,
-    summary="Elegir el tema de color de la portada (MOMENTÁNEO, SPEC-10 M-02)",
+    summary="Elegir el tema de color de la portada",
     responses=error_responses(401, 403, 404, 422),
 )
 async def elegir_tema(
@@ -233,7 +230,7 @@ async def elegir_tema(
 @router.put(
     "/comunicados/{comunicado_id}/portada/imagen",
     response_model=PortadaResponse,
-    summary="Subir una foto de portada (MOMENTÁNEO, SPEC-10 M-02)",
+    summary="Subir una foto de portada",
     responses=error_responses(401, 403, 404, 422),
 )
 async def subir_imagen(
@@ -250,7 +247,7 @@ async def subir_imagen(
 @router.delete(
     "/comunicados/{comunicado_id}/portada",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Volver a la portada automática (MOMENTÁNEO, SPEC-10 M-02)",
+    summary="Volver a la portada automática",
     responses=error_responses(401, 403, 404),
 )
 async def quitar_portada(
@@ -269,7 +266,7 @@ async def quitar_portada(
 @router.get(
     "/comunicados/{comunicado_id}/portada/imagen",
     response_class=Response,
-    summary="Foto de portada (MOMENTÁNEO, SPEC-10 M-02)",
+    summary="Foto de portada",
     responses=error_responses(401, 404),
 )
 async def ver_imagen(
