@@ -51,13 +51,11 @@ MAX_ID = 2**31 - 1  # `comunicados.id` es `integer`: un id mayor no existe y Pos
 TIPOS = {"image/jpeg", "image/png", "image/webp"}
 
 
-# ── Dependencias internas de `notifications` (Perfil 5) ──────────────────────
-# Este archivo reusa dos funciones privadas de `notifications.service` para aplicar
-# exactamente las mismas reglas de lectura (RN-N3) y edición (RN-N5) que los comunicados.
-# Si el Perfil 5 las renombra o cambia su firma, hay que ajustarlo acá: es el único punto
-# de contacto. Pedido para que sean públicas: SPEC-10 §11, U4/U5.
-_filtro_lectura = service._filtro_lectura
-_bloquear_para_editar = service._bloquear_para_editar
+# ── Reglas de `notifications` (Perfil 5) ─────────────────────────────────────
+# Reusa las funciones públicas de `notifications.service` para aplicar exactamente las
+# mismas reglas de lectura (RN-N3) y edición (RN-N5) que los comunicados (SPEC-10 U4).
+_filtro_lectura = service.filtro_lectura
+_bloquear_para_editar = service.bloquear_para_editar
 
 
 # ── Modelo ───────────────────────────────────────────────────────────────────
